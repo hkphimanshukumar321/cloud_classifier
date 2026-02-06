@@ -113,7 +113,7 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
     # Logger
     exp_logger = ExperimentLogger(results_dir / "logs")
     exp_logger.log_machine_info()
-    exp_logger.log_config(config)
+    # exp_logger.log_config(config)
     
     # Multi-GPU
     strategy = setup_multi_gpu()
@@ -244,43 +244,29 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
     print("\n[3/4] Running Experiments...")
     print("-" * 70)
     
-    # Architecture ablation
-    print("\nGROUP 1: ARCHITECTURE")
-    for gr, comp, depth in arch_combos:
+    # Full Factorial combinations
+    # (growth_rate, compression, depth, batch_size, resolution)
+    all_combos = list(product(
+        config.ablation.growth_rates,
+        config.ablation.compressions,
+        config.ablation.depths,
+        config.ablation.batch_sizes,
+        config.ablation.resolutions
+    ))
+
+    print(f"\nFULL FACTORIAL RUN: {len(all_combos)} configurations × {len(seeds)} seeds")
+    
+    for gr, comp, depth, bs, res in all_combos:
         depth_str = '_'.join(map(str, depth))
-        exp_id = f"arch_gr{gr}_c{comp}_d{depth_str}"
+        exp_id = f"gr{gr}_c{comp}_d{depth_str}_bs{bs}_res{res}"
         
         for seed in seeds:
-            progress.set_category(f"ARCH: GR={gr},C={comp},D={depth}")
-            result = run_single(exp_id, gr, comp, depth, config.training.batch_size, 
-                               config.data.img_size[0], seed)
-            result['ablation_group'] = 'architecture'
-            all_results.append(result)
-            exp_logger.log_experiment(exp_id, result)
-            progress.update()
-    
-    # Batch size ablation
-    print("\n\nGROUP 2: BATCH SIZE")
-    for bs in config.ablation.batch_sizes:
-        exp_id = f"batch_{bs}"
-        for seed in seeds:
-            progress.set_category(f"BATCH: {bs}")
-            result = run_single(exp_id, config.model.growth_rate, config.model.compression,
-                               config.model.depth, bs, config.data.img_size[0], seed)
-            result['ablation_group'] = 'batch_size'
-            all_results.append(result)
-            exp_logger.log_experiment(exp_id, result)
-            progress.update()
-    
-    # Resolution ablation
-    print("\n\nGROUP 3: RESOLUTION")
-    for res in config.ablation.resolutions:
-        exp_id = f"res_{res}"
-        for seed in seeds:
-            progress.set_category(f"RESOLUTION: {res}×{res}")
-            result = run_single(exp_id, config.model.growth_rate, config.model.compression,
-                               config.model.depth, config.training.batch_size, res, seed)
-            result['ablation_group'] = 'resolution'
+            progress.set_category(f"CFG: GR={gr},C={comp},D={depth},BS={bs},RES={res}")
+            
+            # Check if result already exists (optional robust restart logic could go here)
+            
+            result = run_single(exp_id, gr, comp, depth, bs, res, seed)
+            result['ablation_group'] = 'full_factorial'
             all_results.append(result)
             exp_logger.log_experiment(exp_id, result)
             progress.update()
