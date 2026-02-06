@@ -78,6 +78,7 @@ class AblationConfig:
     batch_sizes: List[int] = field(default_factory=lambda: [16, 32, 64])
     resolutions: List[int] = field(default_factory=lambda: [32,64, 128])
     learning_rates: List[float] = field(default_factory=lambda: [1e-3, 1e-4])
+    seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
 
 
 @dataclass

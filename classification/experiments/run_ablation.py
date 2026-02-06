@@ -108,7 +108,7 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
     # Setup
     epochs = 2 if quick_test else config.training.epochs
     use_single = single_seed or not config.training.use_multiple_seeds
-    seeds = [config.training.seeds[0]] if use_single else config.training.seeds
+    seeds = [config.ablation.seeds[0]] if use_single else config.ablation.seeds
     
     # Logger
     exp_logger = ExperimentLogger(results_dir / "logs")
