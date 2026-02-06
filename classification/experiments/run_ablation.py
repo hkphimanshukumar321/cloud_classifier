@@ -141,24 +141,30 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
     
     # Experiment design
     print("\n[2/4] Experiment Design...")
-    arch_combos = list(product(
+    
+    # Calculate all combinations
+    all_combos = list(product(
         config.ablation.growth_rates,
         config.ablation.compressions,
-        config.ablation.depths
+        config.ablation.depths,
+        config.ablation.batch_sizes,
+        config.ablation.resolutions,
+        config.ablation.learning_rates
     ))
-    n_arch = len(arch_combos)
-    n_batch = len(config.ablation.batch_sizes)
-    n_resolution = len(config.ablation.resolutions)
-    n_seeds = len(seeds)
     
-    n_configs = n_arch + n_batch + n_resolution
+    n_configs = len(all_combos)
+    n_seeds = len(seeds)
     total_experiments = n_configs * n_seeds
     
-    print(f"\n   Architecture combos: {n_arch}")
-    print(f"   Batch sizes: {config.ablation.batch_sizes}")
+    print(f"\n   Growth Rates: {config.ablation.growth_rates}")
+    print(f"   Compressions: {config.ablation.compressions}")
+    print(f"   Depths: {config.ablation.depths}")
+    print(f"   Batch Sizes: {config.ablation.batch_sizes}")
     print(f"   Resolutions: {config.ablation.resolutions}")
+    print(f"   Learning Rates: {config.ablation.learning_rates}")
     print(f"   Seeds: {seeds}")
-    print(f"   TOTAL: {n_configs} × {n_seeds} = {total_experiments} experiments")
+    print(f"\n   TOTAL CONFIGS: {n_configs}")
+    print(f"   TOTAL EXPERIMENTS: {n_configs} × {n_seeds} = {total_experiments}")
     
     progress = AblationProgress(total_experiments)
     all_results = []
@@ -245,17 +251,6 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
     print("\n[3/4] Running Experiments...")
     print("-" * 70)
     
-    # Full Factorial combinations
-    # (growth_rate, compression, depth, batch_size, resolution)
-    all_combos = list(product(
-        config.ablation.growth_rates,
-        config.ablation.compressions,
-        config.ablation.depths,
-        config.ablation.batch_sizes,
-        config.ablation.resolutions,
-        config.ablation.learning_rates
-    ))
-
     print(f"\nFULL FACTORIAL RUN: {len(all_combos)} configurations × {len(seeds)} seeds")
     
     for gr, comp, depth, bs, res, lr in all_combos:

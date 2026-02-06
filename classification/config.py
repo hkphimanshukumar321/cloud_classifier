@@ -75,7 +75,7 @@ class AblationConfig:
     growth_rates: List[int] = field(default_factory=lambda: [8, 12,16])
     compressions: List[float] = field(default_factory=lambda: [0.2,0.5, 0.75])
     depths: List[Tuple[int, ...]] = field(default_factory=lambda: [(2, 2, 2),(3,3,3) , (4, 4, 4)])
-    batch_sizes: List[int] = field(default_factory=lambda: [16, 32, 64])
+    batch_sizes: List[int] = field(default_factory=lambda: [10,16,32])
     resolutions: List[int] = field(default_factory=lambda: [32,64, 128])
     learning_rates: List[float] = field(default_factory=lambda: [1e-3, 1e-4])
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
