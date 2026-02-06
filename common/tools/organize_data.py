@@ -77,7 +77,7 @@ def organize_classification(
         label = str(row[label_col]).strip()
         
         src = images_dir / fname
-        dst = output_dir / label / fname
+        dst = output_dir / label / Path(fname).name
         
         if src.exists():
             dst.parent.mkdir(exist_ok=True)
