@@ -36,8 +36,8 @@ Thumbs.db
 saved_model/
 
 # Data Directory (except .gitkeep)
-data/*
-!data/.gitkeep
+# data/*
+# !data/.gitkeep
 
 # Results - Runs and Logs (large, regenerable)
 results/runs/*
