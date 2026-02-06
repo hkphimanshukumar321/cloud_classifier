@@ -164,7 +164,7 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
     all_results = []
     
     # Helper function
-    def run_single(exp_id, gr, comp, depth, batch, res, seed):
+    def run_single(exp_id, gr, comp, depth, batch, res, lr, seed):
         np.random.seed(seed)
         tf.random.set_seed(seed)
         
@@ -195,7 +195,7 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
                 dropout_rate=config.model.dropout_rate,
                 initial_filters=config.model.initial_filters
             )
-            model = compile_model(model, learning_rate=config.training.learning_rate)
+            model = compile_model(model, learning_rate=lr)
         
         metrics_info = get_model_metrics(model)
         
@@ -232,6 +232,7 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
             'depth': str(depth),
             'batch_size': batch,
             'resolution': res,
+            'learning_rate': lr,
             'test_accuracy': test_acc * 100,
             'test_loss': test_loss,
             'macro_f1': macro_f1,
@@ -251,21 +252,22 @@ def run_ablation(quick_test: bool = False, single_seed: bool = False):
         config.ablation.compressions,
         config.ablation.depths,
         config.ablation.batch_sizes,
-        config.ablation.resolutions
+        config.ablation.resolutions,
+        config.ablation.learning_rates
     ))
 
     print(f"\nFULL FACTORIAL RUN: {len(all_combos)} configurations × {len(seeds)} seeds")
     
-    for gr, comp, depth, bs, res in all_combos:
+    for gr, comp, depth, bs, res, lr in all_combos:
         depth_str = '_'.join(map(str, depth))
-        exp_id = f"gr{gr}_c{comp}_d{depth_str}_bs{bs}_res{res}"
+        exp_id = f"gr{gr}_c{comp}_d{depth_str}_bs{bs}_res{res}_lr{lr}"
         
         for seed in seeds:
-            progress.set_category(f"CFG: GR={gr},C={comp},D={depth},BS={bs},RES={res}")
+            progress.set_category(f"CFG: GR={gr},C={comp},D={depth},BS={bs},RES={res},LR={lr}")
             
             # Check if result already exists (optional robust restart logic could go here)
             
-            result = run_single(exp_id, gr, comp, depth, bs, res, seed)
+            result = run_single(exp_id, gr, comp, depth, bs, res, lr, seed)
             result['ablation_group'] = 'full_factorial'
             all_results.append(result)
             exp_logger.log_experiment(exp_id, result)

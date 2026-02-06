@@ -60,7 +60,7 @@ class TrainingConfig(BaseTrainingConfig):
     """Training hyperparameters and experiment flags."""
     
     # SNR robustness testing (Classification specific)
-    enable_snr_testing: bool = False
+    enable_snr_testing: bool = True
     snr_levels_db: List[int] = field(default_factory=lambda: [0, 5, 10, 15, 20, 25, 30])
     
     # Training callbacks
@@ -72,17 +72,18 @@ class TrainingConfig(BaseTrainingConfig):
 @dataclass
 class AblationConfig:
     """Ablation study search spaces."""
-    growth_rates: List[int] = field(default_factory=lambda: [8, 16])
-    compressions: List[float] = field(default_factory=lambda: [0.5, 1.0])
-    depths: List[Tuple[int, ...]] = field(default_factory=lambda: [(2, 2, 2), (4, 4, 4)])
-    batch_sizes: List[int] = field(default_factory=lambda: [16, 32])
-    resolutions: List[int] = field(default_factory=lambda: [64, 128])
+    growth_rates: List[int] = field(default_factory=lambda: [8, 12,16])
+    compressions: List[float] = field(default_factory=lambda: [0.2,0.5, 0.75])
+    depths: List[Tuple[int, ...]] = field(default_factory=lambda: [(2, 2, 2),(3,3,3) , (4, 4, 4)])
+    batch_sizes: List[int] = field(default_factory=lambda: [16, 32, 64])
+    resolutions: List[int] = field(default_factory=lambda: [32,64, 128])
+    learning_rates: List[float] = field(default_factory=lambda: [1e-3, 1e-4])
 
 
 @dataclass
 class OutputConfig(BaseOutputConfig):
     """Output directories and settings."""
-    figure_dpi: int = 300
+    figure_dpi: int = 30
     save_history: bool = True
 
 
