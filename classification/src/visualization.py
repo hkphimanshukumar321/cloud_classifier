@@ -257,6 +257,78 @@ def plot_roc_curves(
     return fig
 
 
+def plot_precision_recall_curves(
+    y_true: np.ndarray,
+    y_pred_prob: np.ndarray,
+    class_names: Optional[List[str]] = None,
+    save_path: Optional[Path] = None,
+    show: bool = False
+) -> plt.Figure:
+    """Plot PR curves for multi-class classification."""
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+    from sklearn.preprocessing import label_binarize
+    
+    set_publication_style()
+    n_classes = y_pred_prob.shape[1]
+    y_true_bin = label_binarize(y_true, classes=range(n_classes))
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    colors = plt.cm.tab20(np.linspace(0, 1, n_classes))
+    
+    for i in range(n_classes):
+        precision, recall, _ = precision_recall_curve(y_true_bin[:, i], y_pred_prob[:, i])
+        ap = average_precision_score(y_true_bin[:, i], y_pred_prob[:, i])
+        label = class_names[i] if class_names else f'Class {i}'
+        ax.plot(recall, precision, color=colors[i], lw=1.5, alpha=0.8,
+                label=f'{label} (AP={ap:.2f})')
+                
+    ax.set_xlabel('Recall')
+    ax.set_ylabel('Precision')
+    ax.set_title('Precision-Recall Curves')
+    ax.legend(loc='lower left', fontsize=8, ncol=2)
+    plt.tight_layout()
+    
+    if save_path:
+        fig.savefig(save_path)
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_radar_chart(
+    values_list: List[List[float]],
+    categories: List[str],
+    labels: List[str],
+    title: str = "Model Comparison",
+    save_path: Optional[Path] = None,
+    show: bool = False
+) -> plt.Figure:
+    """Plot a radar chart comparing multiple models across categories."""
+    set_publication_style()
+    n_cats = len(categories)
+    angles = np.linspace(0, 2 * np.pi, n_cats, endpoint=False).tolist()
+    angles += angles[:1]
+    
+    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(projection='polar'))
+    
+    for i, values in enumerate(values_list):
+        vals = values + values[:1]
+        ax.plot(angles, vals, 'o-', linewidth=2, label=labels[i])
+        ax.fill(angles, vals, alpha=0.1)
+        
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(categories)
+    ax.set_title(title, fontweight='bold', y=1.08)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+    
+    if save_path:
+        fig.savefig(save_path)
+    if show:
+        plt.show()
+    return fig
+
+
+
 # =============================================================================
 # ABLATION STUDY PLOTS
 # =============================================================================

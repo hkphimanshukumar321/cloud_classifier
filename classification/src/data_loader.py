@@ -203,6 +203,11 @@ def load_dataset(
     return X, Y
 
 
+# Alias for Master Experiment Runner
+load_dataset_numpy = load_dataset
+
+
+
 # =============================================================================
 # DATASET SPLITTING
 # =============================================================================

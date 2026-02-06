@@ -195,6 +195,11 @@ def create_custom_model(
     return model
 
 
+# Alias for Mast Experiment Runner
+create_rf_densenet = create_custom_model
+
+
+
 def create_simple_cnn(
     input_shape: Tuple[int, int, int],
     num_classes: int,

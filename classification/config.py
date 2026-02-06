@@ -52,31 +52,60 @@ class ModelConfig:
     l2_decay: float = 1e-4
     
     # Initialization
-    initial_filters: int = 24
+    initial_filters: int = 16
 
 
 @dataclass
 class TrainingConfig(BaseTrainingConfig):
     """Training hyperparameters and experiment flags."""
     
-    # SNR robustness testing (Classification specific)
+    # === EXPERIMENT ENABLE FLAGS ===
+    # Multiple seeds for statistical significance
+    use_multiple_seeds: bool = True  # True = 3 seeds
+    seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
+    
+    # Cross-validation (3-fold)
+    enable_cross_validation: bool = True
+    cv_folds: int = 3
+    
+    # SNR robustness testing
     enable_snr_testing: bool = True
     snr_levels_db: List[int] = field(default_factory=lambda: [0, 5, 10, 15, 20, 25, 30])
     
+    # Training parameters
+    epochs: int = 40
+    batch_size: int = 5
+    learning_rate: float = 1e-3
+    
     # Training callbacks
     early_stopping_patience: int = 15
-    reduce_lr_patience: int = 5
-    reduce_lr_factor: float = 0.5
+    gradient_clip_value: float = 1.0
 
 
 @dataclass
 class AblationConfig:
-    """Ablation study search spaces."""
-    growth_rates: List[int] = field(default_factory=lambda: [8, 12,16])
-    compressions: List[float] = field(default_factory=lambda: [0.2,0.5, 0.75])
-    depths: List[Tuple[int, ...]] = field(default_factory=lambda: [(2, 2, 2),(3,3,3) , (4, 4, 4)])
-    batch_sizes: List[int] = field(default_factory=lambda: [10,16,32])
-    resolutions: List[int] = field(default_factory=lambda: [32,64, 128])
+    """
+    Ablation parameters for grouped study.
+    
+    Architecture: 3 × 3 × 3 = 27 configs
+    + Batch size: 3 configs
+    + Resolution: 3 configs
+    = 33 configs × 3 seeds = 99 experiments
+    """
+    # Architecture parameters (Group B)
+    growth_rates: List[int] = field(default_factory=lambda: [4, 8, 12])
+    compressions: List[float] = field(default_factory=lambda: [0.25, 0.5, 0.75])
+    depths: List[Tuple[int, int, int]] = field(default_factory=lambda: [
+        (2, 2, 2), (3, 3, 3), (4, 4, 4)
+    ])
+    
+    # Training parameters (Group C)
+    batch_sizes: List[int] = field(default_factory=lambda: [5, 10, 20])
+    
+    # Input resolution (Group D)
+    resolutions: List[int] = field(default_factory=lambda: [32, 64, 128])
+    
+    # Keep learning rates for flexibility (though not in the 33-config count)
     learning_rates: List[float] = field(default_factory=lambda: [1e-3, 1e-4])
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
 
