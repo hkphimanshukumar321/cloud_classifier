@@ -1,0 +1,66 @@
+# Python Research Template - Git Ignore
+# =====================================
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model Files (large)
+*.h5
+*.keras
+*.pb
+*.onnx
+*.tflite
+saved_model/
+
+# Data Directory (except .gitkeep)
+data/*
+!data/.gitkeep
+
+# Results - Runs and Logs (large, regenerable)
+results/runs/*
+!results/runs/.gitkeep
+results/logs/*
+!results/logs/.gitkeep
+
+# Keep important figures tracked
+# results/figures/* 
+# results/figures_journal/*
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
