@@ -137,7 +137,7 @@ def run_experiment(exp_id, batch_type, gr, comp, depth, batch_size, res, lr, see
         X_val=X_val, y_val=y_val, run_dir=run_dir,
         epochs=epochs, batch_size=batch_size, class_weights=class_weights,
         early_stopping_patience=config.training.early_stopping_patience,
-        verbose=0
+        verbose=2
     )
     
     test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
