@@ -32,7 +32,7 @@ from common.config_base import BaseTrainingConfig, BaseOutputConfig
 @dataclass
 class DataConfig:
     """Dataset parameters."""
-    data_dir: Path = Path(__file__).parent.parent / "data" / "classification" / "raw"
+    data_dir: Path = Path(__file__).parent.parent / "data" / "classification" / "raw2"
     img_size: Tuple[int, int] = (64, 64)  # Low-res for density estimation
     batch_size: int = 32
     validation_split: float = 0.15
