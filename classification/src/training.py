@@ -54,13 +54,13 @@ logger = logging.getLogger(__name__)
 # MODEL COMPILATION
 # =============================================================================
 
-from models import ordinal_targets_from_int
-
 def ordinal_loss(y_true, y_pred):
     """Correlation-aware ordinal loss (BCE on derived targets)."""
-    # Infer num_classes from pred shape: (B, K-1)
-    K_minus_1 = tf.cast(tf.shape(y_pred)[-1], tf.int32)
-    targets = ordinal_targets_from_int(y_true, K_minus_1 + 1)
+    # Infer num_classes from y_pred shape: (B, K-1)
+    K_minus_1 = tf.shape(y_pred)[-1]
+    y_int = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+    # Ordinal encoding: for class c, bits 0..c-1 = 1, rest = 0
+    targets = tf.cast(tf.sequence_mask(y_int, maxlen=K_minus_1), tf.float32)
     return tf.keras.losses.binary_crossentropy(targets, y_pred)
 
 
@@ -195,7 +195,10 @@ def train_model(
     
     if use_balanced_sampling:
         # Use class-aware balanced sampling
-        from data_loader import create_balanced_tf_dataset
+        try:
+            from .data_loader import create_balanced_tf_dataset
+        except ImportError:
+            from data_loader import create_balanced_tf_dataset
         train_ds = create_balanced_tf_dataset(
             X_train, y_train,
             batch_size=batch_size,
