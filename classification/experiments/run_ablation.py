@@ -144,20 +144,21 @@ def run_experiment(
         warmup_steps = steps_per_epoch * config.training.warmup_epochs if config.training.lr_schedule == 'cosine_warmup' else 0
         use_cosine = config.training.lr_schedule in ('cosine', 'cosine_warmup')
 
+        # Mixup config
+        mixup_alpha = config.data.mixup_alpha if config.data.use_mixup else 0.0
+
         model = compile_model(
             model, learning_rate=lr,
             loss=config.training.loss_type,
             label_smoothing=config.training.label_smoothing,
             total_steps=total_steps if use_cosine else 0,
-            warmup_steps=warmup_steps
+            warmup_steps=warmup_steps,
+            use_mixup=(mixup_alpha > 0)
         )
 
     metrics_info = get_model_metrics(model)
     run_dir = results_dir / "runs" / f"Batch{batch_type}_{exp_id}_seed{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Mixup config
-    mixup_alpha = config.data.mixup_alpha if config.data.use_mixup else 0.0
 
     history = train_model(
         model=model, X_train=X_train, y_train=y_train,

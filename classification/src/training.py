@@ -73,6 +73,7 @@ def compile_model(
     total_steps: int = 0,
     warmup_steps: int = 0,
     gradient_clip_value: float = 1.0,
+    use_mixup: bool = False,
     metrics: list = None
 ) -> Model:
     """
@@ -128,9 +129,15 @@ def compile_model(
     if loss == 'ordinal_loss':
         loss_fn = ordinal_loss
         metrics = [ordinal_accuracy]
+    elif use_mixup and label_smoothing > 0:
+        # Mixup produces soft one-hot labels → use categorical CE
+        loss_fn = _mixup_crossentropy(label_smoothing)
     elif label_smoothing > 0:
-        # Sparse labels + label smoothing = custom wrapper
+        # Sparse labels + label smoothing
         loss_fn = _smooth_sparse_crossentropy(label_smoothing)
+    elif use_mixup:
+        # Mixup without smoothing
+        loss_fn = _mixup_crossentropy(0.0)
     else:
         loss_fn = loss
 
@@ -176,26 +183,35 @@ class WarmupCosineSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
 
 def _smooth_sparse_crossentropy(label_smoothing=0.1):
     """
-    Crossentropy with label smoothing that handles both:
-    - Integer (sparse) labels from validation data
-    - One-hot / soft labels from mixup training data
+    Sparse categorical crossentropy with label smoothing.
+    Converts integer labels to one-hot, then applies label smoothing.
+    
+    For mixup (soft labels), use CategoricalCrossentropy directly via
+    _mixup_crossentropy instead.
     """
     def loss_fn(y_true, y_pred):
         num_classes = tf.shape(y_pred)[-1]
-        
-        # Detect if labels are already one-hot (rank 2) or sparse (rank 1)
-        if len(y_true.shape) > 1 and y_true.shape[-1] is not None and y_true.shape[-1] > 1:
-            # Already one-hot / soft labels (from mixup)
-            y_one_hot = y_true
-        else:
-            # Integer labels → convert to one-hot
-            y_int = tf.cast(tf.squeeze(y_true), tf.int32)
-            y_one_hot = tf.one_hot(y_int, num_classes)
-        
+        y_int = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+        y_one_hot = tf.one_hot(y_int, num_classes)
         return tf.keras.losses.categorical_crossentropy(
             y_one_hot, y_pred, label_smoothing=label_smoothing
         )
     loss_fn.__name__ = 'smooth_sparse_crossentropy'
+    return loss_fn
+
+
+def _mixup_crossentropy(label_smoothing=0.1):
+    """
+    Categorical crossentropy for soft/mixed labels (from MixUp).
+    Labels are already one-hot or soft vectors — no conversion needed.
+    """
+    cce = tf.keras.losses.CategoricalCrossentropy(
+        label_smoothing=label_smoothing,
+        reduction=tf.keras.losses.Reduction.NONE
+    )
+    def loss_fn(y_true, y_pred):
+        return cce(y_true, y_pred)
+    loss_fn.__name__ = 'mixup_crossentropy'
     return loss_fn
 
 
@@ -300,9 +316,15 @@ def train_model(
             num_classes=num_classes
         )
         
+        # When mixup is active, loss expects one-hot labels everywhere
+        if mixup_alpha > 0:
+            y_val_for_fit = tf.one_hot(y_val.astype('int32'), num_classes).numpy()
+        else:
+            y_val_for_fit = y_val
+        
         history = model.fit(
             train_ds,
-            validation_data=(X_val, y_val),
+            validation_data=(X_val, y_val_for_fit),
             epochs=epochs,
             steps_per_epoch=steps_per_epoch,
             callbacks=callbacks,
