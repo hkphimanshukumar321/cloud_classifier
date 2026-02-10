@@ -94,7 +94,7 @@ def compile_model(
         Compiled model
     """
     if metrics is None:
-        metrics = ['accuracy']
+        metrics = ['accuracy']  # Will be overridden below for custom losses
     
     # Learning rate schedule: cosine decay with optional warmup
     if total_steps > 0:
@@ -125,20 +125,24 @@ def compile_model(
     else:
         opt = tf.keras.optimizers.Adam(learning_rate=lr_schedule, **clip_kw)
     
-    # Handle loss selection
+    # Handle loss AND metrics selection together.
+    # When using custom loss functions, Keras can't auto-resolve the string
+    # 'accuracy' because it tries to inspect label shapes (y_t.shape.as_list())
+    # which fails with unknown TensorShape from tf.data pipelines.
+    # Fix: explicitly pass the correct metric class.
     if loss == 'ordinal_loss':
         loss_fn = ordinal_loss
         metrics = [ordinal_accuracy]
-    elif use_mixup and label_smoothing > 0:
-        # Mixup produces soft one-hot labels → use categorical CE
-        loss_fn = _mixup_crossentropy(label_smoothing)
-    elif label_smoothing > 0:
-        # Sparse labels + label smoothing
-        loss_fn = _smooth_sparse_crossentropy(label_smoothing)
     elif use_mixup:
-        # Mixup without smoothing
-        loss_fn = _mixup_crossentropy(0.0)
+        # Mixup produces soft one-hot labels → CategoricalCrossentropy + CategoricalAccuracy
+        loss_fn = _mixup_crossentropy(label_smoothing)
+        metrics = [tf.keras.metrics.CategoricalAccuracy(name='accuracy')]
+    elif label_smoothing > 0:
+        # Sparse labels + label smoothing via custom wrapper
+        loss_fn = _smooth_sparse_crossentropy(label_smoothing)
+        metrics = [tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')]
     else:
+        # Standard string loss — Keras auto-resolves 'accuracy' from the string
         loss_fn = loss
 
     model.compile(

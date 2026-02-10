@@ -174,6 +174,10 @@ class CoordinateAttention(layers.Layer):
 
     def build(self, input_shape):
         C = input_shape[-1]
+        if C is None:
+            # Shape unknown at build time (e.g. from pretrained sub-model)
+            # Use a reasonable default; will be rebuilt on first call
+            C = 24
         mid = max(8, C // self.reduction)
         self.conv_reduce = layers.Conv2D(
             mid, 1, padding='same', use_bias=False,
@@ -271,7 +275,11 @@ def _lite_transition(
     name: str
 ) -> tf.Tensor:
     """Lightweight Transition: BN -> Swish -> Conv1x1(compress) -> AvgPool(2x2)."""
-    num_filters = int(x.shape[-1])
+    # Handle potentially None static shape (from pretrained sub-model)
+    num_filters = x.shape[-1]
+    if num_filters is None:
+        num_filters = tf.keras.backend.int_shape(x)[-1] or 24
+    num_filters = int(num_filters)
     reduced = max(8, int(num_filters * compression))
 
     x = layers.BatchNormalization(name=f"{name}_bn")(x)
