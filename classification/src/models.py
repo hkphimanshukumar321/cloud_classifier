@@ -8,28 +8,27 @@
 Model Architecture Module
 =========================
 
-This module contains model definitions for your research.
-Now updated with ADVANCED RF-CloudNet Architecture for >95% accuracy.
+CloudDenseNet-Lite: A novel lightweight architecture for cloud density
+estimation from UAV imagery.
+
+Key innovations:
+1. DS-Dense Blocks: DenseNet connectivity + MobileNet separable convolutions
+2. Coordinate Attention: Encodes spatial cloud patterns efficiently
+3. Low-Resolution Design: Operates on 64x64 inputs for UAV efficiency
+4. Ordinal Head: Predicts density levels (not classes) for visibility
+
+Supports two output modes:
+- output_mode="ordinal"  -> (K-1) sigmoid thresholds + BCE loss (recommended)
+- output_mode="softmax"  -> K-way softmax (standard classification)
 """
 
 import logging
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional
 from dataclasses import dataclass
 
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, Model, Input
-from tensorflow.keras.applications import (
-    VGG16, VGG19,
-    ResNet50V2, ResNet101V2, ResNet152V2,
-    DenseNet121, DenseNet169, DenseNet201,
-    MobileNetV2,
-    EfficientNetV2B0, EfficientNetV2B1, EfficientNetV2B2, EfficientNetV2B3,
-    InceptionV3, InceptionResNetV2,
-    Xception,
-    NASNetMobile,
-    ConvNeXtTiny, ConvNeXtSmall
-)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ class ModelMetrics:
     trainable_params: int
     non_trainable_params: int
     memory_mb: float
-    
+
     def __str__(self) -> str:
         return (
             f"Parameters: {self.total_params:,} "
@@ -58,12 +57,11 @@ def get_model_metrics(model: Model) -> ModelMetrics:
     """Compute model metrics for analysis."""
     total_params = model.count_params()
     trainable_params = sum(
-        tf.keras.backend.count_params(w) 
-        for w in model.trainable_weights
+        tf.keras.backend.count_params(w) for w in model.trainable_weights
     )
     non_trainable_params = total_params - trainable_params
-    memory_mb = (total_params * 4) / (1024 * 1024)  # 4 bytes per float32
-    
+    memory_mb = (total_params * 4) / (1024 * 1024)
+
     return ModelMetrics(
         total_params=total_params,
         trainable_params=trainable_params,
@@ -73,651 +71,343 @@ def get_model_metrics(model: Model) -> ModelMetrics:
 
 
 # =============================================================================
-# ATTENTION MECHANISMS (NEW)
+# ORDINAL LEARNING HELPERS
 # =============================================================================
 
-class ChannelAttention(layers.Layer):
-    """Channel Attention Module from CBAM."""
-    
-    def __init__(self, reduction_ratio: int = 8, **kwargs):
-        super().__init__(**kwargs)
-        self.reduction_ratio = reduction_ratio
-    
-    def build(self, input_shape):
-        channels = input_shape[-1]
-        self.shared_dense_1 = layers.Dense(
-            channels // self.reduction_ratio,
-            activation='relu',
-            kernel_initializer='he_normal',
-            name='channel_att_dense1'
+def ordinal_targets_from_int(y: tf.Tensor, num_classes: int) -> tf.Tensor:
+    """
+    Convert integer label y in [0..K-1] -> ordinal targets z in {0,1}^{K-1}:
+      z_t = 1[y > t], for t=0..K-2
+
+    Example (K=5):
+      y=0 -> [0,0,0,0]
+      y=2 -> [1,1,0,0]
+      y=4 -> [1,1,1,1]
+    """
+    y = tf.cast(y, tf.int32)
+    t = tf.range(num_classes - 1, dtype=tf.int32)
+    return tf.cast(y > t, tf.float32)
+
+
+def ordinal_probs_to_label(p: tf.Tensor, threshold: float = 0.5) -> tf.Tensor:
+    """Convert ordinal probabilities p (B, K-1) -> integer label (B,)."""
+    return tf.reduce_sum(tf.cast(p > threshold, tf.int32), axis=-1)
+
+
+class OrdinalAccuracy(tf.keras.metrics.Metric):
+    """Accuracy for ordinal targets (B, K-1)."""
+    def __init__(self, name="ordinal_accuracy", threshold: float = 0.5, **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.threshold = threshold
+        self.total = self.add_weight(name="total", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true_lbl = tf.reduce_sum(tf.cast(y_true > 0.5, tf.int32), axis=-1)
+        y_pred_lbl = tf.reduce_sum(tf.cast(y_pred > self.threshold, tf.int32), axis=-1)
+        matches = tf.cast(tf.equal(y_true_lbl, y_pred_lbl), tf.float32)
+        if sample_weight is not None:
+            sample_weight = tf.cast(sample_weight, tf.float32)
+            matches = matches * sample_weight
+            denom = tf.reduce_sum(sample_weight)
+        else:
+            denom = tf.cast(tf.size(matches), tf.float32)
+        self.total.assign_add(tf.reduce_sum(matches))
+        self.count.assign_add(denom)
+
+    def result(self):
+        return tf.math.divide_no_nan(self.total, self.count)
+
+    def reset_states(self):
+        self.total.assign(0.0)
+        self.count.assign(0.0)
+
+
+class OrdinalMAE(tf.keras.metrics.Metric):
+    """MAE on class index for ordinal outputs (severity error)."""
+    def __init__(self, name="ordinal_mae", threshold: float = 0.5, **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.threshold = threshold
+        self.total = self.add_weight(name="total", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true_lbl = tf.cast(
+            tf.reduce_sum(tf.cast(y_true > 0.5, tf.int32), axis=-1), tf.float32
         )
-        self.shared_dense_2 = layers.Dense(
-            channels,
-            kernel_initializer='he_normal',
-            name='channel_att_dense2'
+        y_pred_lbl = tf.cast(
+            tf.reduce_sum(tf.cast(y_pred > self.threshold, tf.int32), axis=-1), tf.float32
+        )
+        err = tf.abs(y_true_lbl - y_pred_lbl)
+        if sample_weight is not None:
+            sample_weight = tf.cast(sample_weight, tf.float32)
+            err = err * sample_weight
+            denom = tf.reduce_sum(sample_weight)
+        else:
+            denom = tf.cast(tf.size(err), tf.float32)
+        self.total.assign_add(tf.reduce_sum(err))
+        self.count.assign_add(denom)
+
+    def result(self):
+        return tf.math.divide_no_nan(self.total, self.count)
+
+    def reset_states(self):
+        self.total.assign(0.0)
+        self.count.assign(0.0)
+
+
+# =============================================================================
+# COORDINATE ATTENTION
+# =============================================================================
+
+class CoordinateAttention(layers.Layer):
+    """
+    Coordinate Attention (Hou et al., CVPR 2021).
+
+    Encodes long-range dependencies along one spatial direction while
+    preserving positional information along the other. Ideal for cloud
+    density where horizontal/vertical streaks carry density information.
+    """
+    def __init__(self, reduction: int = 4, **kwargs):
+        super().__init__(**kwargs)
+        self.reduction = reduction
+
+    def build(self, input_shape):
+        C = input_shape[-1]
+        mid = max(8, C // self.reduction)
+        self.conv_reduce = layers.Conv2D(
+            mid, 1, padding='same', use_bias=False,
+            kernel_initializer='he_normal', name=f"{self.name}_reduce"
+        )
+        self.bn = layers.BatchNormalization(name=f"{self.name}_bn")
+        self.conv_h = layers.Conv2D(
+            C, 1, padding='same', use_bias=False,
+            kernel_initializer='he_normal', name=f"{self.name}_conv_h"
+        )
+        self.conv_w = layers.Conv2D(
+            C, 1, padding='same', use_bias=False,
+            kernel_initializer='he_normal', name=f"{self.name}_conv_w"
         )
         super().build(input_shape)
-    
-    def call(self, inputs):
-        # Global pooling
-        avg_pool = layers.GlobalAveragePooling2D()(inputs)
-        max_pool = layers.GlobalMaxPooling2D()(inputs)
-        
-        # Shared MLP
-        avg_out = self.shared_dense_2(self.shared_dense_1(avg_pool))
-        max_out = self.shared_dense_2(self.shared_dense_1(max_pool))
-        
-        # Combine and activate
-        attention = layers.Activation('sigmoid')(avg_out + max_out)
-        attention = layers.Reshape((1, 1, inputs.shape[-1]))(attention)
-        
-        return inputs * attention
 
+    def call(self, x):
+        _, H, W, C = tf.shape(x)[0], x.shape[1], x.shape[2], x.shape[3]
+        pool_h = tf.reduce_mean(x, axis=2, keepdims=True)
+        pool_w = tf.reduce_mean(x, axis=1, keepdims=True)
+        pool_w_t = tf.transpose(pool_w, perm=[0, 2, 1, 3])
 
-class SpatialAttention(layers.Layer):
-    """Spatial Attention Module from CBAM."""
-    
-    def __init__(self, kernel_size: int = 7, **kwargs):
-        super().__init__(**kwargs)
-        self.kernel_size = kernel_size
-    
-    def build(self, input_shape):
-        self.conv = layers.Conv2D(
-            filters=1,
-            kernel_size=self.kernel_size,
-            padding='same',
-            activation='sigmoid',
-            kernel_initializer='he_normal',
-            name='spatial_att_conv'
-        )
-        super().build(input_shape)
-    
-    def call(self, inputs):
-        # Channel-wise pooling
-        avg_pool = tf.reduce_mean(inputs, axis=-1, keepdims=True)
-        max_pool = tf.reduce_max(inputs, axis=-1, keepdims=True)
-        
-        # Concatenate and convolve
-        concat = tf.concat([avg_pool, max_pool], axis=-1)
-        attention = self.conv(concat)
-        
-        return inputs * attention
+        y = tf.concat([pool_h, pool_w_t], axis=1)
+        y = self.conv_reduce(y)
+        y = self.bn(y)
+        y = tf.nn.swish(y)
 
+        h_att, w_att = tf.split(y, [H, W], axis=1)
+        w_att = tf.transpose(w_att, perm=[0, 2, 1, 3])
 
-class CBAM(layers.Layer):
-    """Convolutional Block Attention Module."""
-    
-    def __init__(self, reduction_ratio: int = 8, kernel_size: int = 7, **kwargs):
-        super().__init__(**kwargs)
-        self.channel_att = ChannelAttention(reduction_ratio)
-        self.spatial_att = SpatialAttention(kernel_size)
-    
-    def call(self, inputs):
-        x = self.channel_att(inputs)
-        x = self.spatial_att(x)
-        return x
+        h_att = tf.sigmoid(self.conv_h(h_att))
+        w_att = tf.sigmoid(self.conv_w(w_att))
+
+        return x * h_att * w_att
 
 
 # =============================================================================
-# MULTI-SCALE FEATURE EXTRACTION (NEW)
+# DS-DENSE BLOCK (Novel: DenseNet + MobileNet Separable Convs)
 # =============================================================================
 
-def _multi_scale_conv_block(
-    x: tf.Tensor,
-    filters: int,
-    name: str
-) -> tf.Tensor:
-    """
-    Multi-scale convolution block (Inception-inspired).
-    Captures features at different scales simultaneously.
-    """
-    # 1x1 convolution branch
-    branch1 = layers.Conv2D(
-        filters // 4, 1, padding='same',
-        activation=None, kernel_initializer='he_normal',
-        name=f'{name}_1x1'
-    )(x)
-    
-    # 3x3 convolution branch
-    branch2 = layers.Conv2D(
-        filters // 4, 1, padding='same',
-        activation='relu', kernel_initializer='he_normal',
-        name=f'{name}_3x3_reduce'
-    )(x)
-    branch2 = layers.Conv2D(
-        filters // 4, 3, padding='same',
-        activation=None, kernel_initializer='he_normal',
-        name=f'{name}_3x3'
-    )(branch2)
-    
-    # 5x5 convolution branch (as two 3x3)
-    branch3 = layers.Conv2D(
-        filters // 4, 1, padding='same',
-        activation='relu', kernel_initializer='he_normal',
-        name=f'{name}_5x5_reduce'
-    )(x)
-    branch3 = layers.Conv2D(
-        filters // 4, 3, padding='same',
-        activation='relu', kernel_initializer='he_normal',
-        name=f'{name}_5x5_1'
-    )(branch3)
-    branch3 = layers.Conv2D(
-        filters // 4, 3, padding='same',
-        activation=None, kernel_initializer='he_normal',
-        name=f'{name}_5x5_2'
-    )(branch3)
-    
-    # Pooling branch
-    branch4 = layers.MaxPooling2D(3, strides=1, padding='same', name=f'{name}_pool')(x)
-    branch4 = layers.Conv2D(
-        filters // 4, 1, padding='same',
-        activation=None, kernel_initializer='he_normal',
-        name=f'{name}_pool_proj'
-    )(branch4)
-    
-    # Concatenate all branches
-    output = layers.Concatenate(name=f'{name}_concat')([branch1, branch2, branch3, branch4])
-    output = layers.BatchNormalization(name=f'{name}_bn')(output)
-    output = layers.Activation('relu', name=f'{name}_relu')(output)
-    
-    return output
-
-
-# =============================================================================
-# ENHANCED DENSE BLOCK WITH ATTENTION (UPDATED)
-# =============================================================================
-
-def _dense_block(
+def _ds_dense_block(
     x: tf.Tensor,
     num_layers: int,
     growth_rate: int,
     name: str,
-    use_bottleneck: bool = True,
-    use_attention: bool = True
+    use_coord_att: bool = True
 ) -> tf.Tensor:
     """
-    Enhanced Dense Block implementation for RF-CloudNet.
-    
-    Improvements over original:
-    - Bottleneck layers (1x1 conv) for efficiency
-    - Channel attention for feature recalibration
-    - Dense connections for feature reuse
+    Depthwise-Separable Dense Block (DS-Dense Block).
+
+    Novel: Replaces 3x3 Conv in DenseNet with DepthwiseConv3x3 +
+    PointwiseConv1x1 (MobileNet-style), reducing parameters ~8x
+    while preserving dense connectivity and feature reuse.
     """
     for i in range(num_layers):
-        # Store input for dense connection
         layer_input = x
-        
-        if use_bottleneck:
-            # Bottleneck: BN → ReLU → 1x1 Conv (reduce channels)
-            x = layers.BatchNormalization(name=f"{name}_bn1_{i}")(x)
-            x = layers.Activation('relu', name=f"{name}_relu1_{i}")(x)
-            x = layers.Conv2D(
-                filters=4 * growth_rate,  # Bottleneck expansion
-                kernel_size=1,
-                padding='same',
-                use_bias=False,
-                kernel_initializer='he_normal',
-                name=f"{name}_conv1_{i}"
+
+        out = layers.BatchNormalization(name=f"{name}_bn_{i}")(x)
+        out = layers.Activation('swish', name=f"{name}_swish_{i}")(out)
+
+        # Depthwise Separable Conv (MobileNet-style)
+        out = layers.DepthwiseConv2D(
+            kernel_size=3, padding='same', use_bias=False,
+            depthwise_initializer='he_normal',
+            name=f"{name}_dw_{i}"
+        )(out)
+        out = layers.BatchNormalization(name=f"{name}_dw_bn_{i}")(out)
+        out = layers.Activation('swish', name=f"{name}_dw_swish_{i}")(out)
+
+        out = layers.Conv2D(
+            filters=growth_rate, kernel_size=1, padding='same',
+            use_bias=False, kernel_initializer='he_normal',
+            name=f"{name}_pw_{i}"
+        )(out)
+
+        # Dense connection
+        x = layers.Concatenate(name=f"{name}_concat_{i}")([layer_input, out])
+
+        # Coordinate Attention every 2 layers
+        if use_coord_att and (i % 2 == 1):
+            x = CoordinateAttention(
+                reduction=4, name=f"{name}_ca_{i}"
             )(x)
-        
-        # Main convolution: BN → ReLU → 3x3 Conv
-        x = layers.BatchNormalization(name=f"{name}_bn2_{i}")(x)
-        x = layers.Activation('relu', name=f"{name}_relu2_{i}")(x)
-        x = layers.Conv2D(
-            filters=growth_rate,
-            kernel_size=3,
-            padding='same',
-            use_bias=False,
-            kernel_initializer='he_normal',
-            name=f"{name}_conv2_{i}"
-        )(x)
-        
-        # Optional channel attention
-        if use_attention and i % 2 == 0:  # Apply every 2 layers
-            x = ChannelAttention(reduction_ratio=8, name=f"{name}_ch_att_{i}")(x)
-        
-        # Dense connection: concatenate input with output
-        x = layers.Concatenate(name=f"{name}_concat_{i}")([layer_input, x])
-    
+
     return x
 
 
-def _transition_block(
+# =============================================================================
+# TRANSITION BLOCK
+# =============================================================================
+
+def _lite_transition(
     x: tf.Tensor,
     compression: float,
     name: str
 ) -> tf.Tensor:
-    """Transition Block for feature map compression."""
-    # Compute reduced filter count
+    """Lightweight Transition: BN -> Swish -> Conv1x1(compress) -> AvgPool(2x2)."""
     num_filters = int(x.shape[-1])
-    reduced_filters = max(1, int(num_filters * compression))
-    
-    # Compression pathway
+    reduced = max(8, int(num_filters * compression))
+
     x = layers.BatchNormalization(name=f"{name}_bn")(x)
-    x = layers.Activation('relu', name=f"{name}_relu")(x)
+    x = layers.Activation('swish', name=f"{name}_swish")(x)
     x = layers.Conv2D(
-        filters=reduced_filters,
-        kernel_size=1,
-        padding='same',
-        use_bias=False,
-        kernel_initializer='he_normal',
-        name=f"{name}_conv"
+        reduced, 1, padding='same', use_bias=False,
+        kernel_initializer='he_normal', name=f"{name}_conv"
     )(x)
-    
-    # Spatial downsampling
-    x = layers.AveragePooling2D(pool_size=2, strides=2, name=f"{name}_pool")(x)
-    
+    x = layers.AveragePooling2D(2, strides=2, name=f"{name}_pool")(x)
     return x
 
 
 # =============================================================================
-# YOUR CUSTOM MODEL: ADVANCED RF-CloudNet (UPDATED)
+# CloudDenseNet-Lite MODEL BUILDER
 # =============================================================================
 
-def create_custom_model(
-    input_shape: Tuple[int, int, int],
-    num_classes: int,
+def create_cloud_densenet_lite(
+    input_shape: Tuple[int, int, int] = (64, 64, 3),
+    num_classes: int = 5,
     growth_rate: int = 12,
     compression: float = 0.5,
-    depth: Tuple[int, int, int, int] = (4, 6, 8, 6),
-    dropout_rate: float = 0.3,
-    initial_filters: int = 64,
-    use_multi_scale: bool = True,
-    use_cbam: bool = True,
-    use_bottleneck: bool = True,
-    name: str = "RF_CloudNet"
+    depth: Tuple[int, ...] = (3, 4, 3),
+    initial_filters: int = 24,
+    dropout_rate: float = 0.30,
+    weight_decay: float = 1e-4,
+    use_coord_att: bool = True,
+    use_in_model_aug: bool = True,
+    output_mode: str = "softmax",
+    name: str = "CloudDenseNet_Lite"
 ) -> Model:
     """
-    Creates the ADVANCED RF-CloudNet architecture for >95% accuracy.
-    
-    MAJOR IMPROVEMENTS over original:
-    ----------------------------------
-    1. Multi-scale feature extraction (Inception-style stem)
-    2. Deeper architecture (4, 6, 8, 6 vs 3, 3, 3)
-    3. Bottleneck layers for efficiency
-    4. Channel attention in dense blocks
-    5. CBAM (Channel + Spatial) attention between blocks
-    6. Dual global pooling (avg + max)
-    7. Multi-layer classification head
-    8. Stronger regularization
-    
-    Parameters:
-    -----------
-    input_shape : Input image dimensions (H, W, C)
-    num_classes : Number of output classes
-    growth_rate : Number of filters added per dense layer (default: 12)
-    compression : Compression factor in transition blocks (default: 0.5)
-    depth : Number of layers in each dense block (default: (4, 6, 8, 6))
-    dropout_rate : Dropout probability (default: 0.3)
-    initial_filters : Filters in stem convolution (default: 64)
-    use_multi_scale : Use multi-scale feature extraction (default: True)
-    use_cbam : Use CBAM attention between blocks (default: True)
-    use_bottleneck : Use bottleneck layers in dense blocks (default: True)
-    
-    Returns:
-    --------
-    Keras Model optimized for cloud classification
+    CloudDenseNet-Lite: Novel lightweight architecture for cloud density.
+
+    Novelty:
+    1. DS-Dense Blocks: DenseNet + MobileNet separable convolutions
+    2. Coordinate Attention: Spatial cloud pattern encoding
+    3. Low-Resolution Design: 64x64 inputs for UAV efficiency
+    4. Ordinal Head: Density levels (not classes) for visibility
+
+    Expected: ~40-150K parameters, <2MB memory, <5ms inference.
     """
+    if output_mode not in ("softmax", "ordinal"):
+        raise ValueError("output_mode must be 'softmax' or 'ordinal'")
+
     inputs = Input(shape=input_shape, name="input")
-    
-    # -------------------------------------------------------------------------
-    # STEM: Initial Feature Extraction (IMPROVED)
-    # -------------------------------------------------------------------------
-    if use_multi_scale:
-        # Multi-scale processing for richer initial features
-        x = _multi_scale_conv_block(inputs, initial_filters, name="stem_multiscale")
-    else:
-        # Standard stem (original approach)
-        x = layers.BatchNormalization(name="initial_bn")(inputs)
-        x = layers.Conv2D(
-            filters=initial_filters,
-            kernel_size=3,
-            padding='same',
-            use_bias=False,
-            kernel_initializer='he_normal',
-            name="initial_conv"
-        )(x)
-        x = layers.Activation('relu', name="initial_relu")(x)
-    
-    # Initial pooling for spatial reduction
-    x = layers.MaxPooling2D(pool_size=3, strides=2, padding='same', name="stem_pool")(x)
-    
-    # -------------------------------------------------------------------------
-    # DENSE BLOCKS + TRANSITIONS (ENHANCED)
-    # -------------------------------------------------------------------------
+    x = layers.Lambda(lambda t: tf.cast(t, tf.float32), name="to_float32")(inputs)
+
+    # In-model augmentation (only active during training)
+    if use_in_model_aug:
+        aug = tf.keras.Sequential([
+            layers.RandomFlip("horizontal_and_vertical"),
+            layers.RandomRotation(0.10),
+            layers.RandomZoom(0.15),
+            layers.RandomContrast(0.20),
+        ], name="augment")
+        x = aug(x)
+
+    # Stem
+    x = layers.Conv2D(
+        initial_filters, 3, padding='same', use_bias=False,
+        kernel_initializer='he_normal',
+        kernel_regularizer=tf.keras.regularizers.l2(weight_decay),
+        name="stem_conv"
+    )(x)
+    x = layers.BatchNormalization(name="stem_bn")(x)
+    x = layers.Activation('swish', name="stem_swish")(x)
+
+    # DS-Dense Blocks + Transitions
     for block_idx, num_layers in enumerate(depth):
-        # Dense block with optional bottleneck and attention
-        x = _dense_block(
+        x = _ds_dense_block(
             x,
             num_layers=num_layers,
             growth_rate=growth_rate,
-            name=f"dense_block_{block_idx}",
-            use_bottleneck=use_bottleneck,
-            use_attention=True  # Always use channel attention in blocks
+            name=f"ds_dense_{block_idx}",
+            use_coord_att=use_coord_att
         )
-        
-        # CBAM attention module between blocks (NEW)
-        if use_cbam and block_idx < len(depth) - 1:
-            x = CBAM(reduction_ratio=16, kernel_size=7, name=f"cbam_{block_idx}")(x)
-        
-        # Transition layer (except after last block)
         if block_idx < len(depth) - 1:
-            x = _transition_block(
-                x,
-                compression=compression,
+            x = _lite_transition(
+                x, compression=compression,
                 name=f"transition_{block_idx}"
             )
-    
-    # -------------------------------------------------------------------------
-    # CLASSIFICATION HEAD (ENHANCED)
-    # -------------------------------------------------------------------------
-    # Final normalization
+
+    # Final BN + Multi-Pool
     x = layers.BatchNormalization(name="final_bn")(x)
-    x = layers.Activation('relu', name="final_relu")(x)
-    
-    # Final CBAM attention on output features (NEW)
-    if use_cbam:
-        x = CBAM(reduction_ratio=16, kernel_size=7, name="final_cbam")(x)
-    
-    # Dual global pooling for richer representation (IMPROVED)
-    avg_pool = layers.GlobalAveragePooling2D(name="global_avg_pool")(x)
-    max_pool = layers.GlobalMaxPooling2D(name="global_max_pool")(x)
-    x = layers.Concatenate(name="pool_concat")([avg_pool, max_pool])
-    
-    # Multi-layer classification head (NEW)
+    x = layers.Activation('swish', name="final_swish")(x)
+
+    gap = layers.GlobalAveragePooling2D(name="gap")(x)
+    gmp = layers.GlobalMaxPooling2D(name="gmp")(x)
+    x = layers.Concatenate(name="pool_concat")([gap, gmp])
+
+    # Classification head
+    x = layers.Dropout(dropout_rate, name="dropout")(x)
     x = layers.Dense(
-        512,
-        activation='relu',
+        64, activation='swish',
         kernel_initializer='he_normal',
-        kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+        kernel_regularizer=tf.keras.regularizers.l2(weight_decay),
         name="fc1"
     )(x)
-    x = layers.Dropout(dropout_rate, name="dropout1")(x)
-    
-    x = layers.Dense(
-        256,
-        activation='relu',
-        kernel_initializer='he_normal',
-        kernel_regularizer=tf.keras.regularizers.l2(1e-4),
-        name="fc2"
-    )(x)
     x = layers.Dropout(dropout_rate / 2, name="dropout2")(x)
-    
-    # Output layer
-    outputs = layers.Dense(
-        num_classes,
-        activation='softmax',
-        kernel_initializer='he_normal',
-        name="predictions"
-    )(x)
-    
-    # Build model
-    model = Model(inputs, outputs, name=name)
-    logger.info(f"Created {name} with {model.count_params():,} parameters")
-    
-    return model
 
-
-# Alias for compatibility with existing code
-create_rf_densenet = create_custom_model
-
-
-def create_simple_cnn(
-    input_shape: Tuple[int, int, int],
-    num_classes: int,
-    name: str = "SimpleCNN"
-) -> Model:
-    """Simple 3-layer CNN as minimal baseline."""
-    inputs = Input(shape=input_shape, name="input")
-    
-    x = layers.Conv2D(32, 3, padding='same', activation='relu', name="conv1")(inputs)
-    x = layers.MaxPooling2D(2, name="pool1")(x)
-    
-    x = layers.Conv2D(64, 3, padding='same', activation='relu', name="conv2")(x)
-    x = layers.MaxPooling2D(2, name="pool2")(x)
-    
-    x = layers.Conv2D(128, 3, padding='same', activation='relu', name="conv3")(x)
-    x = layers.GlobalAveragePooling2D(name="global_avg_pool")(x)
-    
-    x = layers.Dropout(0.5, name="dropout")(x)
-    outputs = layers.Dense(num_classes, activation='softmax', name="predictions")(x)
-    
-    return Model(inputs, outputs, name=name)
-
-
-# =============================================================================
-# MAIN INTERFACE
-# =============================================================================
-
-def create_model(
-    input_shape: Tuple[int, int, int],
-    num_classes: int,
-    **kwargs
-) -> Model:
-    """
-    Main interface to create model.
-    Delegates to the advanced custom model.
-    
-    Usage:
-    ------
-    # Create advanced RF-CloudNet (recommended for >95% accuracy)
-    model = create_model(
-        input_shape=(224, 224, 3),
-        num_classes=5,
-        growth_rate=12,
-        depth=(4, 6, 8, 6),
-        use_multi_scale=True,
-        use_cbam=True
-    )
-    
-    # Create original RF-DenseNet (for comparison)
-    model = create_model(
-        input_shape=(224, 224, 3),
-        num_classes=5,
-        growth_rate=8,
-        depth=(3, 3, 3),
-        initial_filters=16,
-        use_multi_scale=False,
-        use_cbam=False,
-        use_bottleneck=False
-    )
-    """
-    return create_custom_model(input_shape, num_classes, **kwargs)
-
-
-# =============================================================================
-# BASELINE MODELS
-# =============================================================================
-
-BASELINE_MODELS = {
-    "VGG16": VGG16,
-    "VGG19": VGG19,
-    "ResNet50V2": ResNet50V2,
-    "ResNet101V2": ResNet101V2,
-    "ResNet152V2": ResNet152V2,
-    "DenseNet121": DenseNet121,
-    "DenseNet169": DenseNet169,
-    "DenseNet201": DenseNet201,
-    "MobileNetV2": MobileNetV2,
-    "EfficientNetV2B0": EfficientNetV2B0,
-    "EfficientNetV2B1": EfficientNetV2B1,
-    "EfficientNetV2B2": EfficientNetV2B2,
-    "EfficientNetV2B3": EfficientNetV2B3,
-    "InceptionV3": InceptionV3,
-    "InceptionResNetV2": InceptionResNetV2,
-    "Xception": Xception,
-    "NASNetMobile": NASNetMobile,
-    "ConvNeXtTiny": ConvNeXtTiny,
-    "ConvNeXtSmall": ConvNeXtSmall,
-}
-
-def create_baseline_model(
-    model_name: str,
-    input_shape: Tuple[int, int, int],
-    num_classes: int,
-    use_pretrained: bool = True,
-    freeze_base: bool = True,
-    dropout_rate: float = 0.2
-) -> Model:
-    """Create a baseline model using transfer learning."""
-    if model_name not in BASELINE_MODELS:
-        raise ValueError(f"Unknown model: {model_name}")
-    
-    weights = 'imagenet' if use_pretrained else None
-    
-    base_model = BASELINE_MODELS[model_name](
-        include_top=False,
-        weights=weights,
-        input_shape=input_shape,
-        pooling='avg'
-    )
-    
-    if freeze_base:
-        base_model.trainable = False
-    
-    inputs = Input(shape=input_shape, name="input")
-    x = base_model(inputs, training=not freeze_base)
-    
-    if dropout_rate > 0:
-        x = layers.Dropout(dropout_rate, name="dropout")(x)
-    
-    outputs = layers.Dense(
-        num_classes, activation='softmax',
-        kernel_initializer='he_normal', name="predictions"
-    )(x)
-    
-    model = Model(inputs, outputs, name=f"{model_name}_transfer")
-    logger.info(f"Created {model_name} baseline with {model.count_params():,} parameters")
-    
-    return model
-
-def get_all_model_variants() -> Dict[str, callable]:
-    """Get all available model variants."""
-    models = {
-        "CustomModel": create_custom_model,
-        "SimpleCNN": create_simple_cnn,
-    }
-    for name in BASELINE_MODELS:
-        models[name] = lambda inp, nc, n=name: create_baseline_model(n, inp, nc)
-    return models
-
-
-# =============================================================================
-# CONFIGURATION PRESETS
-# =============================================================================
-
-def get_model_preset(preset: str, input_shape: Tuple[int, int, int], num_classes: int) -> Model:
-    """
-    Get model with predefined configurations.
-    
-    Presets:
-    --------
-    - 'advanced' or 'rf_cloudnet': Advanced RF-CloudNet (recommended, >95% accuracy)
-    - 'original': Original RF-DenseNet (for comparison)
-    - 'lightweight': Lighter version for faster training
-    - 'heavy': Maximum capacity for best accuracy
-    """
-    if preset in ['advanced', 'rf_cloudnet']:
-        return create_custom_model(
-            input_shape=input_shape,
-            num_classes=num_classes,
-            growth_rate=12,
-            depth=(4, 6, 8, 6),
-            initial_filters=64,
-            dropout_rate=0.3,
-            use_multi_scale=True,
-            use_cbam=True,
-            use_bottleneck=True,
-            name="RF_CloudNet_Advanced"
-        )
-    
-    elif preset == 'original':
-        return create_custom_model(
-            input_shape=input_shape,
-            num_classes=num_classes,
-            growth_rate=8,
-            depth=(3, 3, 3),
-            initial_filters=16,
-            dropout_rate=0.2,
-            use_multi_scale=False,
-            use_cbam=False,
-            use_bottleneck=False,
-            name="RF_DenseNet_Original"
-        )
-    
-    elif preset == 'lightweight':
-        return create_custom_model(
-            input_shape=input_shape,
-            num_classes=num_classes,
-            growth_rate=8,
-            depth=(3, 4, 6, 4),
-            initial_filters=32,
-            dropout_rate=0.3,
-            use_multi_scale=True,
-            use_cbam=False,
-            use_bottleneck=True,
-            name="RF_CloudNet_Lite"
-        )
-    
-    elif preset == 'heavy':
-        return create_custom_model(
-            input_shape=input_shape,
-            num_classes=num_classes,
-            growth_rate=16,
-            depth=(6, 8, 10, 8),
-            initial_filters=96,
-            dropout_rate=0.4,
-            use_multi_scale=True,
-            use_cbam=True,
-            use_bottleneck=True,
-            name="RF_CloudNet_Heavy"
-        )
-    
+    # Output
+    if output_mode == "softmax":
+        outputs = layers.Dense(
+            num_classes, activation='softmax', name='predictions'
+        )(x)
     else:
-        raise ValueError(f"Unknown preset: {preset}. Choose from: 'advanced', 'original', 'lightweight', 'heavy'")
+        outputs = layers.Dense(
+            num_classes - 1, activation='sigmoid', name='predictions_ordinal'
+        )(x)
+
+    model = Model(inputs, outputs, name=name)
+    logger.info(f"Created {name} ({output_mode}) with {model.count_params():,} params")
+    return model
+
+
+# Aliases for backward compatibility with experiment runner
+create_model = create_cloud_densenet_lite
+create_custom_model = create_cloud_densenet_lite
+create_rf_densenet = create_cloud_densenet_lite
 
 
 # =============================================================================
-# USAGE EXAMPLES
+# USAGE EXAMPLE
 # =============================================================================
 
 if __name__ == "__main__":
-    print("="*70)
-    print("RF-CloudNet Model Architecture Examples")
-    print("="*70)
-    
-    # Example 1: Advanced RF-CloudNet (recommended)
-    print("\n1. Advanced RF-CloudNet (Recommended for >95% accuracy):")
-    model_advanced = create_model(
-        input_shape=(224, 224, 3),
-        num_classes=5,
-        growth_rate=12,
-        depth=(4, 6, 8, 6),
-        use_multi_scale=True,
-        use_cbam=True
-    )
-    print(f"   Parameters: {model_advanced.count_params():,}")
-    
-    # Example 2: Original RF-DenseNet (for comparison)
-    print("\n2. Original RF-DenseNet (Baseline):")
-    model_original = create_model(
-        input_shape=(224, 224, 3),
-        num_classes=5,
-        growth_rate=8,
-        depth=(3, 3, 3),
-        initial_filters=16,
-        use_multi_scale=False,
-        use_cbam=False,
-        use_bottleneck=False
-    )
-    print(f"   Parameters: {model_original.count_params():,}")
-    
-    # Example 3: Using presets
-    print("\n3. Using Presets:")
-    model_preset = get_model_preset('advanced', (224, 224, 3), 5)
-    print(f"   Preset 'advanced': {model_preset.count_params():,} parameters")
-    
-    print("\n" + "="*70)
-    print("Model architecture updated successfully!")
-    print("Use create_model() or get_model_preset() in your training code.")
-    print("="*70)
+    print("=" * 60)
+    print("CloudDenseNet-Lite Architecture Test")
+    print("=" * 60)
+
+    print("\n1) Softmax mode:")
+    m1 = create_cloud_densenet_lite((64, 64, 3), 5, output_mode="softmax")
+    print(get_model_metrics(m1))
+    print(f"   Output shape: {m1.output_shape}")
+
+    print("\n2) Ordinal mode:")
+    m2 = create_cloud_densenet_lite((64, 64, 3), 5, output_mode="ordinal")
+    print(get_model_metrics(m2))
+    print(f"   Output shape: {m2.output_shape}")

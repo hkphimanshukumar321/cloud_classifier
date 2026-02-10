@@ -8,21 +8,10 @@
 Experiment Configuration
 ========================
 
-UPDATED FOR CloudLiteNet-TL + optional Ordinal Learning
+Configuration for CloudDenseNet-Lite experiments.
 
-Key updates:
-- ModelConfig now supports:
-    - model_type: 'cloudlitenet_tl' (recommended), 'legacy_rf_cloudnet'
-    - backbone: 'MobileNetV2' / 'EfficientNetV2B0'
-    - output_mode: 'softmax' / 'ordinal'
-    - freeze_backbone, head_dim, weight_decay, use_gem, use_in_model_aug
-- TrainingConfig loss supports:
-    - 'categorical_crossentropy' (softmax)
-    - 'binary_crossentropy' (ordinal)
-- Augmentation defaults adjusted for ground-based cloud images:
-    - rotation_range reduced
-    - vertical_flip default OFF
-(If your images are satellite/overhead, you can turn vertical_flip ON and increase rotation_range.)
+Model: CloudDenseNet-Lite (DS-Dense Blocks + Coordinate Attention)
+Output modes: 'softmax' (standard) or 'ordinal' (density levels)
 """
 
 from pathlib import Path
@@ -44,32 +33,19 @@ from common.config_base import BaseTrainingConfig, BaseOutputConfig
 class DataConfig:
     """Dataset parameters."""
     data_dir: Path = Path(__file__).parent.parent / "data" / "classification" / "raw"
-    img_size: Tuple[int, int] = (224, 224)
+    img_size: Tuple[int, int] = (64, 64)  # Low-res for density estimation
     batch_size: int = 32
-    validation_split: float = 0.2
-    test_split: float = 0.1
-    max_images_per_class: Optional[int] = None  # For debugging
+    validation_split: float = 0.15
+    test_split: float = 0.15
+    max_images_per_class: Optional[int] = None
 
     # Augmentation
     use_augmentation: bool = True
-    augmentation_strength: str = 'medium'  # 'light', 'medium', 'strong'
+    use_balanced_sampling: bool = True  # Class-aware sampling for imbalance
 
-    # NOTE:
-    # For ground-based sky images, full 180° rotation + vertical flip can be harmful.
-    # For satellite images, they can be OK.
-    rotation_range: int = 25              # was 180
-    zoom_range: float = 0.15              # was 0.2
-    horizontal_flip: bool = True
-    vertical_flip: bool = False           # was True (set True only if satellite-like)
-    brightness_range: Tuple[float, float] = (0.85, 1.15)
-    contrast_range: float = 0.2
-
-    # Advanced augmentation
-    # MixUp works with BOTH softmax and ordinal (labels become fractional; BCE can handle).
+    # MixUp (works with both softmax and ordinal)
     use_mixup: bool = True
     mixup_alpha: float = 0.2
-    use_cutmix: bool = False
-    cutmix_alpha: float = 1.0
 
 
 # =============================================================================
@@ -78,40 +54,19 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
-    """
-    Model architecture hyperparameters.
-
-    model_type:
-      - 'cloudlitenet_tl'      : (RECOMMENDED) Transfer Learning, lightweight + stable on small datasets
-      - 'legacy_rf_cloudnet'   : Your older dense/CBAM architecture (kept for ablation/compare)
-    """
-    # === SELECTION ===
-    model_type: str = 'cloudlitenet_tl'
-
-    # === CloudLiteNet-TL params (NEW) ===
-    backbone: str = 'MobileNetV2'      # 'MobileNetV2' or 'EfficientNetV2B0'
-    freeze_backbone: bool = True      # Stage-1 freeze; then fine-tune (your training code should unfreeze later)
-    input_scale: str = "0_1"          # "0_1" if pipeline outputs [0,1]; "0_255" if [0,255]
-    output_mode: str = "softmax"      # "softmax" or "ordinal"
-    head_dim: int = 128               # 128 good for MobileNetV2
-    weight_decay: float = 1e-4
-    dropout_rate: float = 0.40
-    use_gem: bool = True
-    use_in_model_aug: bool = True     # if you already do aug in tf.data, set False
-
-    # Optional label smoothing (ONLY for softmax)
-    use_label_smoothing: bool = True
-    label_smoothing: float = 0.05
-
-    # === LEGACY RF-CloudNet params (kept for comparison) ===
+    """CloudDenseNet-Lite hyperparameters."""
+    # Architecture
     growth_rate: int = 12
     compression: float = 0.5
-    depth: Tuple[int, int, int, int] = (4, 6, 8, 6)
-    initial_filters: int = 64
-    use_multi_scale: bool = True
-    use_cbam: bool = True
-    use_bottleneck: bool = True
-    l2_decay: float = 1e-4
+    depth: Tuple[int, ...] = (3, 4, 3)
+    initial_filters: int = 24
+    dropout_rate: float = 0.30
+    weight_decay: float = 1e-4
+    use_coord_att: bool = True
+    use_in_model_aug: bool = True
+
+    # Output
+    output_mode: str = "softmax"  # "softmax" or "ordinal"
 
 
 # =============================================================================
@@ -120,21 +75,19 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig(BaseTrainingConfig):
-    """Training hyperparameters and experiment flags."""
+    """Training hyperparameters."""
 
-    # === EXPERIMENT FLAGS ===
+    # Experiment flags
     use_multiple_seeds: bool = True
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
 
     enable_cross_validation: bool = True
     cv_folds: int = 3
 
-    # SNR testing is not meaningful for vision classification unless you synthetically corrupt images
     enable_snr_testing: bool = False
     snr_levels_db: List[int] = field(default_factory=lambda: [0, 5, 10, 15, 20, 25, 30])
 
-    # === TRAINING PARAMETERS ===
-    # For TL on small dataset, you usually do NOT need 150 epochs.
+    # Training parameters
     epochs: int = 80
     batch_size: int = 32
     learning_rate: float = 1e-3
@@ -142,107 +95,86 @@ class TrainingConfig(BaseTrainingConfig):
     # LR schedule
     use_warmup: bool = True
     warmup_epochs: int = 3
-    lr_schedule: str = 'cosine_warmup'   # 'constant', 'cosine_warmup', 'exponential', 'reduce_on_plateau'
+    lr_schedule: str = 'cosine_warmup'
     min_lr: float = 1e-6
 
     # Optimizer
-    optimizer: str = 'adamw'             # 'adam', 'adamw', 'sgd'
+    optimizer: str = 'adam'
     weight_decay: float = 1e-4
     gradient_clip_value: float = 1.0
 
-    # === LOSS FUNCTION ===
-    # For softmax: categorical_crossentropy (optionally label smoothing handled in loss)
-    # For ordinal: binary_crossentropy
-    loss_type: str = 'categorical_crossentropy'  # 'categorical_crossentropy' or 'binary_crossentropy' or 'focal'
-    use_focal_loss: bool = True
-    focal_alpha: float = 0.25
-    focal_gamma: float = 2.0
+    # Loss
+    loss_type: str = 'sparse_categorical_crossentropy'
 
-    # === CLASS IMBALANCE HANDLING ===
+    # Class imbalance
     use_class_weights: bool = True
-    class_weight_method: str = 'effective_num'  # 'balanced', 'inverse_freq', 'effective_num'
 
-    # === CALLBACKS ===
+    # Callbacks
     early_stopping_patience: int = 15
     reduce_lr_patience: int = 10
     reduce_lr_factor: float = 0.5
 
-    # === TEST-TIME AUG ===
-    use_tta: bool = False
-    tta_rounds: int = 5
-
-    # === OPTIONAL: two-stage fine-tune switches (NEW) ===
-    # (Your training script must implement these if you want automatic unfreezing)
-    two_stage_finetune: bool = True
-    head_train_epochs: int = 20
-    finetune_epochs: int = 30
-    finetune_lr: float = 1e-4
-    unfreeze_last_ratio: float = 0.3   # unfreeze last 30% layers of backbone in stage-2
-
 
 # =============================================================================
-# ABLATION / BASELINES / OUTPUT (UNCHANGED MOSTLY)
+# ABLATION CONFIG
 # =============================================================================
 
 @dataclass
 class AblationConfig:
-    """Ablation parameters."""
-    architecture_variants: List[Dict[str, bool]] = field(default_factory=lambda: [
-        {'use_multi_scale': False, 'use_cbam': False, 'use_bottleneck': False},
-        {'use_multi_scale': True,  'use_cbam': False, 'use_bottleneck': False},
-        {'use_multi_scale': True,  'use_cbam': True,  'use_bottleneck': False},
-        {'use_multi_scale': True,  'use_cbam': True,  'use_bottleneck': True},
-    ])
+    """Ablation parameters for CloudDenseNet-Lite."""
 
+    # Batch B: Architecture ablation
     growth_rates: List[int] = field(default_factory=lambda: [8, 12, 16])
     compressions: List[float] = field(default_factory=lambda: [0.4, 0.5, 0.6])
-    depths: List[Tuple[int, int, int, int]] = field(default_factory=lambda: [
-        (3, 4, 6, 4),
-        (4, 6, 8, 6),
-        (6, 8, 10, 8),
+    depths: List[Tuple[int, ...]] = field(default_factory=lambda: [
+        (2, 3, 2),
+        (3, 4, 3),
+        (4, 6, 4),
     ])
 
-    initial_filters_list: List[int] = field(default_factory=lambda: [32, 64, 96])
-
-    loss_functions: List[str] = field(default_factory=lambda: [
-        'categorical_crossentropy',
-        'focal',
-        'binary_crossentropy',
-    ])
-
-    augmentation_strengths: List[str] = field(default_factory=lambda: ['light', 'medium', 'strong'])
-
+    # Batch C: Batch size
     batch_sizes: List[int] = field(default_factory=lambda: [16, 32, 64])
-    learning_rates: List[float] = field(default_factory=lambda: [1e-3, 5e-4, 1e-4])
-    resolutions: List[int] = field(default_factory=lambda: [128, 224, 256])
-    dropout_rates: List[float] = field(default_factory=lambda: [0.2, 0.3, 0.4])
+
+    # Batch D: Resolution
+    resolutions: List[int] = field(default_factory=lambda: [48, 64, 96])
+
+    # Batch E: Coordinate Attention ablation
+    coord_att_options: List[bool] = field(default_factory=lambda: [False, True])
+
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
 
 
+# =============================================================================
+# BASELINE CONFIG
+# =============================================================================
+
 @dataclass
 class BaselineConfig:
+    """Baseline models for comparison (MobileNetV2 transfer learning)."""
     baseline_models: List[str] = field(default_factory=lambda: [
-        'ResNet50V2',
-        'DenseNet121',
-        'EfficientNetV2B0',
         'MobileNetV2',
+        'EfficientNetV2B0',
     ])
     use_pretrained: bool = True
     freeze_base: bool = True
-    unfreeze_after_epochs: int = 20
 
+
+# =============================================================================
+# OUTPUT CONFIG
+# =============================================================================
 
 @dataclass
 class OutputConfig(BaseOutputConfig):
     figure_dpi: int = 300
     save_history: bool = True
     save_best_only: bool = True
-
     save_confusion_matrix: bool = True
     save_classification_report: bool = True
-    save_attention_maps: bool = False  # CBAM-only legacy
-    save_feature_maps: bool = False
 
+
+# =============================================================================
+# MASTER CONFIG
+# =============================================================================
 
 @dataclass
 class ResearchConfig:
@@ -253,9 +185,9 @@ class ResearchConfig:
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
-    experiment_name: str = "CloudLiteNet_TL"
-    description: str = "Lightweight Transfer Learning for cloudiness classification"
-    version: str = "3.0"
+    experiment_name: str = "CloudDenseNet_Lite"
+    description: str = "Cloud density estimation using lightweight DS-Dense architecture"
+    version: str = "4.0"
 
 
 # =============================================================================
@@ -263,111 +195,58 @@ class ResearchConfig:
 # =============================================================================
 
 def get_quick_test_config() -> ResearchConfig:
+    """Quick smoke test config."""
     config = ResearchConfig()
-    config.data.img_size = (160, 160)
     config.data.max_images_per_class = 50
-    config.training.epochs = 5
+    config.training.epochs = 3
     config.training.enable_cross_validation = False
     config.training.use_multiple_seeds = False
     config.experiment_name = "Quick_Test"
     return config
 
 
-def get_recommended_tl_softmax_config() -> ResearchConfig:
-    """
-    Recommended first run:
-    - TL + softmax
-    - stable baseline to judge confusion matrix
-    """
+def get_full_run_config() -> ResearchConfig:
+    """Full experiment config."""
     config = ResearchConfig()
-    config.model.model_type = 'cloudlitenet_tl'
-    config.model.backbone = 'MobileNetV2'
-    config.model.freeze_backbone = True
-    config.model.output_mode = 'softmax'
-    config.training.loss_type = 'categorical_crossentropy'
-    config.experiment_name = "CloudLiteNet_TL_Softmax"
-    return config
-
-
-def get_recommended_tl_ordinal_config() -> ResearchConfig:
-    """
-    Ordinal run:
-    - TL + ordinal head
-    NOTE: your training pipeline must convert labels to ordinal targets.
-    """
-    config = ResearchConfig()
-    config.model.model_type = 'cloudlitenet_tl'
-    config.model.backbone = 'MobileNetV2'
-    config.model.freeze_backbone = True
-    config.model.output_mode = 'ordinal'
-    config.training.loss_type = 'binary_crossentropy'
-    # label smoothing is not applicable the same way for ordinal; keep it off
-    config.model.use_label_smoothing = False
-    config.experiment_name = "CloudLiteNet_TL_Ordinal"
-    return config
-
-
-def get_legacy_rf_cloudnet_config() -> ResearchConfig:
-    """
-    Legacy compare (not recommended for your small dataset).
-    """
-    config = ResearchConfig()
-    config.model.model_type = 'legacy_rf_cloudnet'
-    config.experiment_name = "Legacy_RF_CloudNet"
+    config.experiment_name = "CloudDenseNet_Lite_Full"
     return config
 
 
 # =============================================================================
-# SUMMARY UTILS
+# SUMMARY
 # =============================================================================
 
 def print_experiment_summary(config: ResearchConfig):
-    print("=" * 70)
-    print(f"EXPERIMENT CONFIGURATION: {config.experiment_name}")
-    print("=" * 70)
+    print("=" * 60)
+    print(f"EXPERIMENT: {config.experiment_name} (v{config.version})")
+    print("=" * 60)
 
-    print(f"\n[*] Data:")
-    print(f"  - Directory: {config.data.data_dir}")
-    print(f"  - Image Size: {config.data.img_size}")
-    print(f"  - Batch Size (Data): {config.data.batch_size}")
-    print(f"  - Augmentation: {config.data.augmentation_strength}")
-    print(f"  - Rot/Flip: rot={config.data.rotation_range}, hflip={config.data.horizontal_flip}, vflip={config.data.vertical_flip}")
-    print(f"  - Mixup: {config.data.use_mixup} (alpha={config.data.mixup_alpha})")
+    print(f"\n[Data]")
+    print(f"  Directory : {config.data.data_dir}")
+    print(f"  Image Size: {config.data.img_size}")
+    print(f"  Batch Size: {config.data.batch_size}")
+    print(f"  Balanced  : {config.data.use_balanced_sampling}")
 
-    print(f"\n[*] Model:")
-    print(f"  - Type: {config.model.model_type}")
-    print(f"  - Backbone: {config.model.backbone}")
-    print(f"  - Freeze backbone: {config.model.freeze_backbone}")
-    print(f"  - Output mode: {config.model.output_mode}")
-    print(f"  - Head dim: {config.model.head_dim}")
-    print(f"  - Dropout: {config.model.dropout_rate}")
-    print(f"  - Weight decay: {config.model.weight_decay}")
-    print(f"  - GeM pooling: {config.model.use_gem}")
+    print(f"\n[Model] CloudDenseNet-Lite")
+    print(f"  Growth Rate    : {config.model.growth_rate}")
+    print(f"  Compression    : {config.model.compression}")
+    print(f"  Depth          : {config.model.depth}")
+    print(f"  Initial Filters: {config.model.initial_filters}")
+    print(f"  Coord Attention: {config.model.use_coord_att}")
+    print(f"  Dropout        : {config.model.dropout_rate}")
+    print(f"  Output Mode    : {config.model.output_mode}")
 
-    print(f"\n[*] Training:")
-    print(f"  - Epochs: {config.training.epochs}")
-    print(f"  - Batch Size (Train): {config.training.batch_size}")
-    print(f"  - LR: {config.training.learning_rate} | schedule={config.training.lr_schedule}")
-    print(f"  - Optimizer: {config.training.optimizer} (wd={config.training.weight_decay})")
-    print(f"  - Loss: {config.training.loss_type}")
-    print(f"  - Focal loss: {config.training.use_focal_loss}")
-    print(f"  - Class weights: {config.training.use_class_weights} ({config.training.class_weight_method})")
-    print(f"  - Two-stage finetune: {config.training.two_stage_finetune} "
-          f"(head={config.training.head_train_epochs}, ft={config.training.finetune_epochs}, ft_lr={config.training.finetune_lr})")
+    print(f"\n[Training]")
+    print(f"  Epochs     : {config.training.epochs}")
+    print(f"  LR         : {config.training.learning_rate}")
+    print(f"  Optimizer  : {config.training.optimizer}")
+    print(f"  Loss       : {config.training.loss_type}")
+    print(f"  Class Wts  : {config.training.use_class_weights}")
+    print(f"  CV Folds   : {config.training.cv_folds} (enabled={config.training.enable_cross_validation})")
+    print(f"  Seeds      : {config.training.seeds}")
+    print("=" * 60)
 
-    print(f"\n[*] Experiments:")
-    print(f"  - Cross-Validation: {config.training.enable_cross_validation} ({config.training.cv_folds} folds)")
-    print(f"  - Multiple Seeds: {config.training.use_multiple_seeds} ({len(config.training.seeds)} seeds)")
-    print("=" * 70)
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
 
 if __name__ == "__main__":
-    cfg = get_recommended_tl_softmax_config()
+    cfg = ResearchConfig()
     print_experiment_summary(cfg)
-
-    cfg_ord = get_recommended_tl_ordinal_config()
-    print_experiment_summary(cfg_ord)

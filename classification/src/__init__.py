@@ -8,10 +8,10 @@
 Research Template - Source Package
 ===================================
 
-Core modules for image classification research.
+Core modules for cloud density classification using CloudDenseNet-Lite.
 """
 
-from .models import create_model, create_baseline_model, get_model_metrics
+from .models import create_model, create_cloud_densenet_lite, get_model_metrics
 from .data_loader import load_dataset, split_dataset, create_tf_dataset
 from .training import train_model, compile_model, setup_gpu
 from .visualization import plot_training_history, plot_confusion_matrix
@@ -23,7 +23,7 @@ from common.logger import ExperimentLogger
 
 __all__ = [
     'create_model',
-    'create_baseline_model', 
+    'create_cloud_densenet_lite',
     'get_model_metrics',
     'load_dataset',
     'split_dataset',

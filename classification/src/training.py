@@ -54,10 +54,21 @@ logger = logging.getLogger(__name__)
 # MODEL COMPILATION
 # =============================================================================
 
+from models import ordinal_targets_from_int
+
+def ordinal_loss(y_true, y_pred):
+    """Correlation-aware ordinal loss (BCE on derived targets)."""
+    # Infer num_classes from pred shape: (B, K-1)
+    K_minus_1 = tf.cast(tf.shape(y_pred)[-1], tf.int32)
+    targets = ordinal_targets_from_int(y_true, K_minus_1 + 1)
+    return tf.keras.losses.binary_crossentropy(targets, y_pred)
+
+
 def compile_model(
     model: Model,
     learning_rate: float = 1e-3,
     optimizer: str = 'adam',
+    loss: str = 'sparse_categorical_crossentropy',
     metrics: list = None
 ) -> Model:
     """
@@ -67,6 +78,7 @@ def compile_model(
         model: Keras model
         learning_rate: Learning rate
         optimizer: Optimizer name ('adam', 'sgd', 'rmsprop')
+        loss: Loss function name or object
         metrics: List of metrics (default: ['accuracy'])
         
     Returns:
@@ -84,13 +96,32 @@ def compile_model(
     else:
         opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     
+    # Handle custom losses
+    if loss == 'ordinal_loss':
+        loss_fn = ordinal_loss
+        metrics = [ordinal_accuracy]
+    else:
+        loss_fn = loss
+
     model.compile(
         optimizer=opt,
-        loss='sparse_categorical_crossentropy',
+        loss=loss_fn,
         metrics=metrics
     )
     
     return model
+
+
+def ordinal_accuracy(y_true, y_pred):
+    """Accuracy for ordinal regression (sum of sigmoids > 0.5)."""
+    # y_pred: (B, K-1) sigmoids
+    # Class is sum of strictly positive probabilities (threshold 0.5)
+    pred_labels = tf.reduce_sum(tf.cast(y_pred > 0.5, tf.int32), axis=-1)
+    
+    # y_true: (B, 1) or (B,) int
+    true_labels = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+    
+    return tf.cast(tf.equal(true_labels, pred_labels), tf.float32)
 
 
 # =============================================================================
@@ -110,10 +141,11 @@ def train_model(
     early_stopping_patience: int = 15,
     reduce_lr_patience: int = 5,
     reduce_lr_factor: float = 0.5,
+    use_balanced_sampling: bool = True,
     verbose: int = 1
 ) -> Dict[str, list]:
     """
-    Train model with callbacks.
+    Train model with callbacks and optional class-balanced sampling.
     
     Args:
         model: Compiled Keras model
@@ -126,6 +158,7 @@ def train_model(
         early_stopping_patience: Early stopping patience
         reduce_lr_patience: LR reduction patience
         reduce_lr_factor: LR reduction factor
+        use_balanced_sampling: Use class-balanced sampling (recommended)
         verbose: Verbosity level
         
     Returns:
@@ -157,15 +190,37 @@ def train_model(
         CSVLogger(str(run_dir / 'training_log.csv'))
     ]
     
-    history = model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
-        epochs=epochs,
-        batch_size=batch_size,
-        callbacks=callbacks,
-        class_weight=class_weights,
-        verbose=verbose
-    )
+    # Compute steps_per_epoch for balanced sampling
+    steps_per_epoch = max(1, len(X_train) // batch_size)
+    
+    if use_balanced_sampling:
+        # Use class-aware balanced sampling
+        from data_loader import create_balanced_tf_dataset
+        train_ds = create_balanced_tf_dataset(
+            X_train, y_train,
+            batch_size=batch_size,
+            augment=True
+        )
+        
+        history = model.fit(
+            train_ds,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+            callbacks=callbacks,
+            class_weight=class_weights,
+            verbose=verbose
+        )
+    else:
+        history = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            class_weight=class_weights,
+            verbose=verbose
+        )
     
     # Save history
     history_path = run_dir / 'history.json'

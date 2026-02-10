@@ -305,10 +305,12 @@ def create_tf_dataset(
 
 @tf.function
 def augment_batch(images: tf.Tensor, labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Apply data augmentation to a batch."""
+    """Apply data augmentation to a batch (enhanced for cloud density)."""
     images = tf.image.random_flip_left_right(images)
-    images = tf.image.random_brightness(images, max_delta=0.1)
-    images = tf.image.random_contrast(images, lower=0.9, upper=1.1)
+    images = tf.image.random_flip_up_down(images)  # clouds have no strict "up"
+    images = tf.image.random_brightness(images, max_delta=0.15)
+    images = tf.image.random_contrast(images, lower=0.85, upper=1.15)
+    images = tf.image.random_saturation(images, lower=0.9, upper=1.1)
     images = tf.clip_by_value(images, 0.0, 1.0)
     return images, labels
 
@@ -335,3 +337,73 @@ def add_noise(images: np.ndarray, snr_db: float) -> np.ndarray:
     noise_power = signal_power / (10 ** (snr_db / 10))
     noise = np.random.normal(0, np.sqrt(noise_power), images.shape)
     return np.clip(images + noise, 0, 1).astype(np.float32)
+
+
+# =============================================================================
+# CLASS-AWARE BALANCED SAMPLING (for imbalanced datasets)
+# =============================================================================
+
+def create_balanced_tf_dataset(
+    X: np.ndarray,
+    Y: np.ndarray,
+    batch_size: int = 32,
+    augment: bool = True,
+    prefetch: bool = True
+) -> tf.data.Dataset:
+    """
+    Create a class-balanced TF dataset using per-class sampling.
+    
+    Instead of random sampling (which over-represents majority classes),
+    this creates one dataset per class and samples uniformly across them.
+    This ensures each batch has roughly equal representation.
+    
+    Args:
+        X: Feature array
+        Y: Label array (integer class indices)
+        batch_size: Batch size
+        augment: Apply augmentation
+        prefetch: Enable prefetching
+        
+    Returns:
+        Balanced tf.data.Dataset
+    """
+    unique_classes = np.unique(Y)
+    num_classes = len(unique_classes)
+    
+    # Create per-class datasets
+    per_class_datasets = []
+    for cls in unique_classes:
+        mask = Y == cls
+        X_cls = X[mask]
+        Y_cls = Y[mask]
+        
+        ds = tf.data.Dataset.from_tensor_slices((X_cls, Y_cls))
+        ds = ds.shuffle(len(X_cls), reshuffle_each_iteration=True)
+        ds = ds.repeat()  # infinite stream per class
+        per_class_datasets.append(ds)
+    
+    # Uniform sampling weights (equal probability per class)
+    weights = [1.0 / num_classes] * num_classes
+    
+    # Sample from all class datasets with equal probability
+    balanced_ds = tf.data.Dataset.sample_from_datasets(
+        per_class_datasets, weights=weights
+    )
+    
+    balanced_ds = balanced_ds.batch(batch_size)
+    
+    if augment:
+        balanced_ds = balanced_ds.map(
+            augment_batch, num_parallel_calls=tf.data.AUTOTUNE
+        )
+    
+    balanced_ds = balanced_ds.cache()
+    
+    if prefetch:
+        balanced_ds = balanced_ds.prefetch(tf.data.AUTOTUNE)
+    
+    logger.info(
+        f"Created balanced dataset: {num_classes} classes, "
+        f"~{len(X)//num_classes} samples/class effective"
+    )
+    return balanced_ds

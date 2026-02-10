@@ -101,7 +101,7 @@ def run_cross_validation(n_folds: int = None, quick_test: bool = False):
             num_classes=num_classes,
             **{k: getattr(config.model, k) for k in ['growth_rate', 'compression', 'depth', 'dropout_rate', 'initial_filters']}
         )
-        model = compile_model(model, config.training.learning_rate)
+        model = compile_model(model, config.training.learning_rate, loss=config.training.loss_type)
         
         fold_dir = results_dir / f"fold_{fold_idx + 1}"
         fold_dir.mkdir(parents=True, exist_ok=True)
