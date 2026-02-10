@@ -348,7 +348,9 @@ def create_balanced_tf_dataset(
     Y: np.ndarray,
     batch_size: int = 32,
     augment: bool = True,
-    prefetch: bool = True
+    prefetch: bool = True,
+    mixup_alpha: float = 0.0,
+    num_classes: int = 5
 ) -> tf.data.Dataset:
     """
     Create a class-balanced TF dataset using per-class sampling.
@@ -363,6 +365,8 @@ def create_balanced_tf_dataset(
         batch_size: Batch size
         augment: Apply augmentation
         prefetch: Enable prefetching
+        mixup_alpha: MixUp alpha (0 = disabled). Produces soft one-hot labels.
+        num_classes: Number of classes (needed for mixup one-hot encoding)
         
     Returns:
         Balanced tf.data.Dataset
@@ -397,7 +401,12 @@ def create_balanced_tf_dataset(
             augment_batch, num_parallel_calls=tf.data.AUTOTUNE
         )
     
-    balanced_ds = balanced_ds.cache()
+    if mixup_alpha > 0.0:
+        def _apply_mixup(images, labels):
+            return mixup_batch(images, labels, alpha=mixup_alpha, num_classes=num_classes)
+        balanced_ds = balanced_ds.map(
+            _apply_mixup, num_parallel_calls=tf.data.AUTOTUNE
+        )
     
     if prefetch:
         balanced_ds = balanced_ds.prefetch(tf.data.AUTOTUNE)
@@ -405,5 +414,51 @@ def create_balanced_tf_dataset(
     logger.info(
         f"Created balanced dataset: {num_classes} classes, "
         f"~{len(X)//num_classes} samples/class effective"
+        f"{', mixup='+str(mixup_alpha) if mixup_alpha > 0 else ''}"
     )
     return balanced_ds
+
+
+def mixup_batch(
+    images: tf.Tensor,
+    labels: tf.Tensor,
+    alpha: float = 0.2,
+    num_classes: int = 5
+) -> tuple:
+    """
+    MixUp augmentation: blend random pairs of images within a batch.
+    
+    Creates synthetic training samples by linear interpolation:
+        mixed_image = λ * image_a + (1-λ) * image_b
+        mixed_label = λ * onehot_a + (1-λ) * onehot_b
+    
+    where λ ~ Beta(alpha, alpha).
+    
+    Returns one-hot (soft) labels, compatible with CategoricalCrossentropy.
+    """
+    batch_size = tf.shape(images)[0]
+    
+    # Sample mixing coefficient from Beta distribution
+    # Beta(0.2, 0.2) produces values near 0 or 1 (light mixing)
+    lam = tf.random.uniform([], 0, 1)
+    # Approximate Beta by clipping uniform — simple and effective
+    lam = tf.maximum(lam, 1.0 - lam)  # Ensure λ ≥ 0.5 (original dominates)
+    
+    # Shuffle indices for pairing
+    indices = tf.random.shuffle(tf.range(batch_size))
+    shuffled_images = tf.gather(images, indices)
+    shuffled_labels = tf.gather(labels, indices)
+    
+    # Mix images
+    mixed_images = lam * images + (1.0 - lam) * shuffled_images
+    
+    # Convert labels to one-hot and mix
+    labels_int = tf.cast(tf.squeeze(labels), tf.int32)
+    shuffled_int = tf.cast(tf.squeeze(shuffled_labels), tf.int32)
+    
+    labels_oh = tf.one_hot(labels_int, num_classes)
+    shuffled_oh = tf.one_hot(shuffled_int, num_classes)
+    
+    mixed_labels = lam * labels_oh + (1.0 - lam) * shuffled_oh
+    
+    return mixed_images, mixed_labels

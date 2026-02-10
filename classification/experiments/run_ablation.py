@@ -107,7 +107,7 @@ def run_experiment(
         data_dir=data_dir, categories=categories,
         img_size=(resolution, resolution),
         max_images_per_class=config.data.max_images_per_class,
-        show_progress=False
+        show_progress=True
     )
 
     splits = split_dataset(X_exp, Y_exp, test_size=0.15, val_size=0.15, seed=seed)
@@ -133,14 +133,31 @@ def run_experiment(
             dropout_rate=dropout_rate,
             use_coord_att=use_coord_att,
             use_in_model_aug=True,
+            use_pretrained_stem=config.model.use_pretrained_stem,
             output_mode=config.model.output_mode,
             name=f"CDN_{exp_id}"
         )
-        model = compile_model(model, learning_rate=lr, loss=config.training.loss_type)
+
+        # Cosine LR schedule
+        steps_per_epoch = max(1, len(X_train) // batch_size)
+        total_steps = steps_per_epoch * epochs
+        warmup_steps = steps_per_epoch * config.training.warmup_epochs if config.training.lr_schedule == 'cosine_warmup' else 0
+        use_cosine = config.training.lr_schedule in ('cosine', 'cosine_warmup')
+
+        model = compile_model(
+            model, learning_rate=lr,
+            loss=config.training.loss_type,
+            label_smoothing=config.training.label_smoothing,
+            total_steps=total_steps if use_cosine else 0,
+            warmup_steps=warmup_steps
+        )
 
     metrics_info = get_model_metrics(model)
     run_dir = results_dir / "runs" / f"Batch{batch_type}_{exp_id}_seed{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mixup config
+    mixup_alpha = config.data.mixup_alpha if config.data.use_mixup else 0.0
 
     history = train_model(
         model=model, X_train=X_train, y_train=y_train,
@@ -148,7 +165,10 @@ def run_experiment(
         epochs=epochs, batch_size=batch_size,
         class_weights=class_weights_dict,
         early_stopping_patience=config.training.early_stopping_patience,
-        verbose=0
+        use_cosine_lr=use_cosine,
+        mixup_alpha=mixup_alpha,
+        num_classes=num_classes,
+        verbose=2
     )
 
     test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
@@ -158,6 +178,8 @@ def run_experiment(
 
     latency = benchmark_inference(model, inp_shape, warmup_runs=3, benchmark_runs=10)
     close_all_figures()
+
+    print(f"  >> {exp_id} seed={seed}: acc={test_acc*100:.1f}%  F1={macro_f1:.1f}%  params={metrics_info.total_params:,}")
 
     tf.keras.backend.clear_session()
 

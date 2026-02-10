@@ -101,16 +101,33 @@ def run_cross_validation(n_folds: int = None, quick_test: bool = False):
             num_classes=num_classes,
             **{k: getattr(config.model, k) for k in ['growth_rate', 'compression', 'depth', 'dropout_rate', 'initial_filters']}
         )
-        model = compile_model(model, config.training.learning_rate, loss=config.training.loss_type)
+
+        steps_per_epoch = max(1, len(X_train) // config.training.batch_size)
+        total_steps = steps_per_epoch * epochs
+        warmup_steps = steps_per_epoch * config.training.warmup_epochs if config.training.lr_schedule == 'cosine_warmup' else 0
+        use_cosine = config.training.lr_schedule in ('cosine', 'cosine_warmup')
+
+        model = compile_model(
+            model, config.training.learning_rate,
+            loss=config.training.loss_type,
+            label_smoothing=config.training.label_smoothing,
+            total_steps=total_steps if use_cosine else 0,
+            warmup_steps=warmup_steps
+        )
         
         fold_dir = results_dir / f"fold_{fold_idx + 1}"
         fold_dir.mkdir(parents=True, exist_ok=True)
+
+        mixup_alpha = config.data.mixup_alpha if config.data.use_mixup else 0.0
         
         history = train_model(
             model, X_train, y_train, X_val, y_val,
             run_dir=fold_dir, epochs=epochs,
             batch_size=config.training.batch_size,
-            verbose=0
+            use_cosine_lr=use_cosine,
+            mixup_alpha=mixup_alpha,
+            num_classes=num_classes,
+            verbose=2
         )
         
         # Evaluate

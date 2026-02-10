@@ -33,7 +33,7 @@ from common.config_base import BaseTrainingConfig, BaseOutputConfig
 class DataConfig:
     """Dataset parameters."""
     data_dir: Path = Path(__file__).parent.parent / "data" / "classification" / "raw2"
-    img_size: Tuple[int, int] = (64, 64)  # Low-res for density estimation
+    img_size: Tuple[int, int] = (128, 128)  # Higher res for better accuracy
     batch_size: int = 32
     validation_split: float = 0.15
     test_split: float = 0.15
@@ -64,6 +64,7 @@ class ModelConfig:
     weight_decay: float = 1e-4
     use_coord_att: bool = True
     use_in_model_aug: bool = True
+    use_pretrained_stem: bool = True  # Use MobileNetV2 first block as stem
 
     # Output
     output_mode: str = "softmax"  # "softmax" or "ordinal"
@@ -105,6 +106,7 @@ class TrainingConfig(BaseTrainingConfig):
 
     # Loss
     loss_type: str = 'sparse_categorical_crossentropy'
+    label_smoothing: float = 0.1  # Prevents overconfident predictions
 
     # Class imbalance
     use_class_weights: bool = True
@@ -136,7 +138,7 @@ class AblationConfig:
     batch_sizes: List[int] = field(default_factory=lambda: [16, 32, 64])
 
     # Batch D: Resolution
-    resolutions: List[int] = field(default_factory=lambda: [48, 64, 96])
+    resolutions: List[int] = field(default_factory=lambda: [64, 128, 224])
 
     # Batch E: Coordinate Attention ablation
     coord_att_options: List[bool] = field(default_factory=lambda: [False, True])

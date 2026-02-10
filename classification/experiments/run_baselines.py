@@ -124,15 +124,34 @@ def run_baselines(models: List[str] = None, quick_test: bool = False):
         initial_filters=config.model.initial_filters,
         dropout_rate=config.model.dropout_rate,
         use_coord_att=config.model.use_coord_att,
+        use_pretrained_stem=config.model.use_pretrained_stem,
         output_mode=config.model.output_mode
     )
-    model = compile_model(model, config.training.learning_rate, loss=config.training.loss_type)
+
+    steps_per_epoch = max(1, len(X_train) // config.training.batch_size)
+    total_steps = steps_per_epoch * epochs
+    warmup_steps = steps_per_epoch * config.training.warmup_epochs if config.training.lr_schedule == 'cosine_warmup' else 0
+    use_cosine = config.training.lr_schedule in ('cosine', 'cosine_warmup')
+
+    model = compile_model(
+        model, config.training.learning_rate,
+        loss=config.training.loss_type,
+        label_smoothing=config.training.label_smoothing,
+        total_steps=total_steps if use_cosine else 0,
+        warmup_steps=warmup_steps
+    )
     metrics = get_model_metrics(model)
+
+    mixup_alpha = config.data.mixup_alpha if config.data.use_mixup else 0.0
 
     train_model(
         model, X_train, y_train, X_val, y_val,
         run_dir=results_dir / "CloudDenseNet_Lite", epochs=epochs,
-        batch_size=config.training.batch_size, verbose=0
+        batch_size=config.training.batch_size,
+        use_cosine_lr=use_cosine,
+        mixup_alpha=mixup_alpha,
+        num_classes=num_classes,
+        verbose=2
     )
 
     loss, acc = model.evaluate(X_test, y_test, verbose=0)
@@ -164,7 +183,7 @@ def run_baselines(models: List[str] = None, quick_test: bool = False):
             train_model(
                 model, X_train, y_train, X_val, y_val,
                 run_dir=results_dir / model_name, epochs=epochs,
-                batch_size=config.training.batch_size, verbose=0
+                batch_size=config.training.batch_size, verbose=2
             )
 
             loss, acc = model.evaluate(X_test, y_test, verbose=0)

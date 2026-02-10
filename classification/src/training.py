@@ -69,6 +69,10 @@ def compile_model(
     learning_rate: float = 1e-3,
     optimizer: str = 'adam',
     loss: str = 'sparse_categorical_crossentropy',
+    label_smoothing: float = 0.0,
+    total_steps: int = 0,
+    warmup_steps: int = 0,
+    gradient_clip_value: float = 1.0,
     metrics: list = None
 ) -> Model:
     """
@@ -76,9 +80,13 @@ def compile_model(
     
     Args:
         model: Keras model
-        learning_rate: Learning rate
+        learning_rate: Peak learning rate
         optimizer: Optimizer name ('adam', 'sgd', 'rmsprop')
         loss: Loss function name or object
+        label_smoothing: Label smoothing factor (0=off, 0.1=recommended)
+        total_steps: Total training steps (for cosine decay; 0=constant LR)
+        warmup_steps: Linear warmup steps before cosine decay
+        gradient_clip_value: Max gradient value (stabilizes training)
         metrics: List of metrics (default: ['accuracy'])
         
     Returns:
@@ -87,19 +95,42 @@ def compile_model(
     if metrics is None:
         metrics = ['accuracy']
     
-    if optimizer == 'adam':
-        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    elif optimizer == 'sgd':
-        opt = tf.keras.optimizers.SGD(learning_rate=learning_rate, momentum=0.9)
-    elif optimizer == 'rmsprop':
-        opt = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
+    # Learning rate schedule: cosine decay with optional warmup
+    if total_steps > 0:
+        cosine_decay = tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=learning_rate,
+            decay_steps=total_steps,
+            alpha=1e-6  # minimum LR
+        )
+        if warmup_steps > 0:
+            # Linear warmup: ramp from 0 to peak LR over warmup_steps
+            lr_schedule = WarmupCosineSchedule(
+                learning_rate, total_steps, warmup_steps
+            )
+        else:
+            lr_schedule = cosine_decay
     else:
-        opt = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        lr_schedule = learning_rate
     
-    # Handle custom losses
+    # Gradient clipping prevents large gradient spikes that cause loss fluctuation
+    clip_kw = {'clipvalue': gradient_clip_value} if gradient_clip_value > 0 else {}
+    
+    if optimizer == 'adam':
+        opt = tf.keras.optimizers.Adam(learning_rate=lr_schedule, **clip_kw)
+    elif optimizer == 'sgd':
+        opt = tf.keras.optimizers.SGD(learning_rate=lr_schedule, momentum=0.9, **clip_kw)
+    elif optimizer == 'rmsprop':
+        opt = tf.keras.optimizers.RMSprop(learning_rate=lr_schedule, **clip_kw)
+    else:
+        opt = tf.keras.optimizers.Adam(learning_rate=lr_schedule, **clip_kw)
+    
+    # Handle loss selection
     if loss == 'ordinal_loss':
         loss_fn = ordinal_loss
         metrics = [ordinal_accuracy]
+    elif label_smoothing > 0:
+        # Sparse labels + label smoothing = custom wrapper
+        loss_fn = _smooth_sparse_crossentropy(label_smoothing)
     else:
         loss_fn = loss
 
@@ -112,15 +143,66 @@ def compile_model(
     return model
 
 
+class WarmupCosineSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    """Linear warmup followed by cosine decay."""
+    
+    def __init__(self, peak_lr, total_steps, warmup_steps):
+        super().__init__()
+        self.peak_lr = peak_lr
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
+    
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        warmup = tf.cast(self.warmup_steps, tf.float32)
+        total = tf.cast(self.total_steps, tf.float32)
+        
+        # Linear warmup
+        warmup_lr = self.peak_lr * (step / tf.maximum(warmup, 1.0))
+        
+        # Cosine decay after warmup
+        progress = (step - warmup) / tf.maximum(total - warmup, 1.0)
+        cosine_lr = self.peak_lr * 0.5 * (1.0 + tf.cos(np.pi * progress))
+        
+        return tf.where(step < warmup, warmup_lr, cosine_lr)
+    
+    def get_config(self):
+        return {
+            'peak_lr': self.peak_lr,
+            'total_steps': self.total_steps,
+            'warmup_steps': self.warmup_steps
+        }
+
+
+def _smooth_sparse_crossentropy(label_smoothing=0.1):
+    """
+    Crossentropy with label smoothing that handles both:
+    - Integer (sparse) labels from validation data
+    - One-hot / soft labels from mixup training data
+    """
+    def loss_fn(y_true, y_pred):
+        num_classes = tf.shape(y_pred)[-1]
+        
+        # Detect if labels are already one-hot (rank 2) or sparse (rank 1)
+        if len(y_true.shape) > 1 and y_true.shape[-1] is not None and y_true.shape[-1] > 1:
+            # Already one-hot / soft labels (from mixup)
+            y_one_hot = y_true
+        else:
+            # Integer labels → convert to one-hot
+            y_int = tf.cast(tf.squeeze(y_true), tf.int32)
+            y_one_hot = tf.one_hot(y_int, num_classes)
+        
+        return tf.keras.losses.categorical_crossentropy(
+            y_one_hot, y_pred, label_smoothing=label_smoothing
+        )
+    loss_fn.__name__ = 'smooth_sparse_crossentropy'
+    return loss_fn
+
+
 def ordinal_accuracy(y_true, y_pred):
     """Accuracy for ordinal regression (sum of sigmoids > 0.5)."""
-    # y_pred: (B, K-1) sigmoids
-    # Class is sum of strictly positive probabilities (threshold 0.5)
     pred_labels = tf.reduce_sum(tf.cast(y_pred > 0.5, tf.int32), axis=-1)
-    
-    # y_true: (B, 1) or (B,) int
     true_labels = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
-    
     return tf.cast(tf.equal(true_labels, pred_labels), tf.float32)
 
 
@@ -142,6 +224,9 @@ def train_model(
     reduce_lr_patience: int = 5,
     reduce_lr_factor: float = 0.5,
     use_balanced_sampling: bool = True,
+    use_cosine_lr: bool = False,
+    mixup_alpha: float = 0.0,
+    num_classes: int = 5,
     verbose: int = 1
 ) -> Dict[str, list]:
     """
@@ -154,11 +239,14 @@ def train_model(
         run_dir: Directory for saving checkpoints and logs
         epochs: Maximum epochs
         batch_size: Batch size
-        class_weights: Optional class weights for imbalanced data
+        class_weights: Optional class weights
         early_stopping_patience: Early stopping patience
         reduce_lr_patience: LR reduction patience
         reduce_lr_factor: LR reduction factor
-        use_balanced_sampling: Use class-balanced sampling (recommended)
+        use_balanced_sampling: Use class-balanced sampling
+        use_cosine_lr: If True, skip ReduceLROnPlateau (LR handled by schedule)
+        mixup_alpha: MixUp alpha (0 = disabled)
+        num_classes: Number of classes
         verbose: Verbosity level
         
     Returns:
@@ -174,13 +262,6 @@ def train_model(
             restore_best_weights=True,
             verbose=1
         ),
-        ReduceLROnPlateau(
-            monitor='val_loss',
-            patience=reduce_lr_patience,
-            factor=reduce_lr_factor,
-            min_lr=1e-7,
-            verbose=1
-        ),
         ModelCheckpoint(
             str(run_dir / 'best_model.keras'),
             monitor='val_accuracy',
@@ -190,11 +271,23 @@ def train_model(
         CSVLogger(str(run_dir / 'training_log.csv'))
     ]
     
+    # Only add ReduceLROnPlateau if NOT using cosine schedule
+    if not use_cosine_lr:
+        callbacks.append(
+            ReduceLROnPlateau(
+                monitor='val_loss',
+                patience=reduce_lr_patience,
+                factor=reduce_lr_factor,
+                min_lr=1e-7,
+                verbose=1
+            )
+        )
+    
     # Compute steps_per_epoch for balanced sampling
     steps_per_epoch = max(1, len(X_train) // batch_size)
     
     if use_balanced_sampling:
-        # Use class-aware balanced sampling
+        # Use class-aware balanced sampling + optional mixup
         try:
             from .data_loader import create_balanced_tf_dataset
         except ImportError:
@@ -202,7 +295,9 @@ def train_model(
         train_ds = create_balanced_tf_dataset(
             X_train, y_train,
             batch_size=batch_size,
-            augment=True
+            augment=True,
+            mixup_alpha=mixup_alpha,
+            num_classes=num_classes
         )
         
         history = model.fit(

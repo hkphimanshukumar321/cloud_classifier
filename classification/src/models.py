@@ -299,6 +299,7 @@ def create_cloud_densenet_lite(
     weight_decay: float = 1e-4,
     use_coord_att: bool = True,
     use_in_model_aug: bool = True,
+    use_pretrained_stem: bool = False,
     output_mode: str = "softmax",
     name: str = "CloudDenseNet_Lite"
 ) -> Model:
@@ -308,7 +309,7 @@ def create_cloud_densenet_lite(
     Novelty:
     1. DS-Dense Blocks: DenseNet + MobileNet separable convolutions
     2. Coordinate Attention: Spatial cloud pattern encoding
-    3. Low-Resolution Design: 64x64 inputs for UAV efficiency
+    3. Optional Pretrained Stem: MobileNetV2 first block for transfer learning
     4. Ordinal Head: Density levels (not classes) for visibility
 
     Expected: ~40-150K parameters, <2MB memory, <5ms inference.
@@ -330,14 +331,48 @@ def create_cloud_densenet_lite(
         x = aug(x)
 
     # Stem
-    x = layers.Conv2D(
-        initial_filters, 3, padding='same', use_bias=False,
-        kernel_initializer='he_normal',
-        kernel_regularizer=tf.keras.regularizers.l2(weight_decay),
-        name="stem_conv"
-    )(x)
-    x = layers.BatchNormalization(name="stem_bn")(x)
-    x = layers.Activation('swish', name="stem_swish")(x)
+    if use_pretrained_stem:
+        # Use MobileNetV2 first inverted residual as pretrained stem
+        # Rescale [0,1] -> [-1,1] for MobileNetV2 compatibility
+        x_scaled = layers.Rescaling(scale=2.0, offset=-1.0, name="rescale_for_mobilenet")(x)
+
+        base_model = tf.keras.applications.MobileNetV2(
+            input_shape=input_shape,
+            include_top=False,
+            weights='imagenet'
+        )
+        # Extract first inverted residual block output (lightweight: ~1.7K params)
+        stem_layer = base_model.get_layer('expanded_conv_project_BN')
+        stem_extractor = tf.keras.Model(
+            inputs=base_model.input,
+            outputs=stem_layer.output,
+            name='pretrained_stem'
+        )
+        # Freeze pretrained weights
+        for layer in stem_extractor.layers:
+            layer.trainable = False
+
+        x = stem_extractor(x_scaled)
+
+        # Project pretrained features to initial_filters
+        x = layers.Conv2D(
+            initial_filters, 1, padding='same', use_bias=False,
+            kernel_initializer='he_normal',
+            kernel_regularizer=tf.keras.regularizers.l2(weight_decay),
+            name="stem_project"
+        )(x)
+        x = layers.BatchNormalization(name="stem_project_bn")(x)
+        x = layers.Activation('swish', name="stem_project_swish")(x)
+    else:
+        # Original lightweight stem
+        x = layers.Conv2D(
+            initial_filters, 3, padding='same', use_bias=False,
+            kernel_initializer='he_normal',
+            kernel_regularizer=tf.keras.regularizers.l2(weight_decay),
+            name="stem_conv"
+        )(x)
+        x = layers.BatchNormalization(name="stem_bn")(x)
+        x = layers.Activation('swish', name="stem_swish")(x)
 
     # DS-Dense Blocks + Transitions
     for block_idx, num_layers in enumerate(depth):
